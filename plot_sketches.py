@@ -1,8 +1,8 @@
 # 2023 10 Andrew: testing ways of visualizing rolling OOS and shrinkage estimates
 # to do: 
-#   use abs(tstat), add sign information to oos returns
-#   split sample at 2004
-
+#   nicer split sample at 2004 (use a function)
+#   flip decay sign for intuitiveness?
+#   cross sectional standard errors using montonicity
 
 #%% environment ---------------------------------------------------------------
 
@@ -34,6 +34,7 @@ elif MachineUsed==2: # Andrew
 
 # Select rolling t-stat / oos file
 rollsignal_file = 'OOS_signal_tstat_OosNyears1.csv.gzip'
+USE_SIGN_INFO = True
 
 #%% Load data ----------------------------------------------------------------
 
@@ -73,23 +74,26 @@ rollfamily = rollsignal1\
 rollsignal2 = rollsignal1.merge(rollfamily, on=['signal_family', 'oos_begin_year'])\
     .assign(ret_pred = lambda x: x['ret_is']*(1-x['shrinkage']))
 
+# apply in-sample sign information if requested
+if USE_SIGN_INFO:
+    rollsignal2['sign_is'] = np.sign(rollsignal2['ret_is'])
+    for col in ['ret_is', 'ret_oos', 'tstat_is', 'tstat_oos', 'ret_pred']:
+        rollsignal2[col] = rollsignal2[col]*rollsignal2['sign_is']
+
 #%% Sort each year, take mean returns, then measure decay (plot) -------------
-# replicates Chen Lopez Zim Table 4
 
-# predictions work nicely before 2004 or so
-# After 2004, there is too much decay, especially for acct vw
-# this should work as a main figure if we make it look nice 
-# right now it's understated compared to the box plots
-
+# standard errors are currently overstated.  They don't account for
+# the monotonicity of returns w.r.t. in-sample groups
+# we should use some kind of regression line w/ confidence intervals
 
 # user input
 n_groups = 20
-mean_begin = 1983 # min 1993
-mean_end = 2017 # max 2017
+mean_begin = 1983 # really min year
+mean_end = 2021 # max year
 n_se_plot = 2 # for errorbars
 y_lim_all = [-1,1]
 
-# sort
+# sort into is_group bins
 rollsignal2['is_group'] = rollsignal2.groupby(['signal_family', 'oos_begin_year'])\
     ['ret_is'].transform(lambda x: pd.qcut(x, n_groups, labels=np.arange(1,n_groups+1)\
                                  , duplicates='drop'))
@@ -151,7 +155,84 @@ for i in range(len(family_list)):
     ax.set_ylabel('out-of-sample return')     
 
 # save as pdf
-plt.savefig(str(path_figs) + '/shrinkage_vs_oos.pdf', bbox_inches="tight")
+plt.savefig(str(path_figs) + '/shrinkage_vs_oos_cross.pdf', bbox_inches="tight")
+
+#%% Shrinkage vs oos ret pre 2004 only -------------
+
+# standard errors are currently overstated.  They don't account for
+# the monotonicity of returns w.r.t. in-sample groups
+# we should use some kind of regression line w/ confidence intervals
+
+# user input
+n_groups = 20
+mean_begin = 1983 # really min year
+mean_end = 2004 # max year
+n_se_plot = 2 # for errorbars
+y_lim_all = [-1,1]
+
+# sort into is_group bins
+rollsignal2['is_group'] = rollsignal2.groupby(['signal_family', 'oos_begin_year'])\
+    ['ret_is'].transform(lambda x: pd.qcut(x, n_groups, labels=np.arange(1,n_groups+1)\
+                                 , duplicates='drop'))
+
+# aggregate to bin, year
+roll_is_group = rollsignal2.groupby(['signal_family', 'oos_begin_year', 'is_group'])\
+    .agg({'ret_is': 'mean', 'ret_pred': 'mean', 'ret_oos': 'mean'}).reset_index()
+
+# agg to bin
+sum_is_group = roll_is_group[(roll_is_group['oos_begin_year'] >= mean_begin) \
+                            & (roll_is_group['oos_begin_year'] <= mean_end)]\
+    .groupby(['signal_family','is_group'])\
+    .agg({'ret_is': 'mean', 'ret_pred': 'mean', 'ret_oos': 'mean'}).reset_index()
+
+# find standard error for ret_oos 
+#   we should move to non-overlapping observations
+temp = roll_is_group[(roll_is_group['oos_begin_year'] >= mean_begin) \
+                            & (roll_is_group['oos_begin_year'] <= mean_end)]\
+    .groupby(['signal_family','is_group'])\
+    .agg({'ret_oos': ['std','count']}).reset_index()
+
+sum_is_group['ret_oos_se'] = n_se_plot*temp['ret_oos']['std'] / np.sqrt(temp['ret_oos']['count'])
+
+# find decay by family [is there a cleaner way to do this?]
+sum_is_group['decay_oos'] = 1-sum_is_group['ret_oos']/sum_is_group['ret_is']
+sum_is_group['decay_pred'] = 1-sum_is_group['ret_pred']/sum_is_group['ret_is']
+family_decay = sum_is_group[abs(sum_is_group['ret_is']) > 0.10]\
+    .groupby(['signal_family'])\
+    .agg({'decay_oos': 'mean', 'decay_pred': 'mean'})
+
+# plot
+plt.rcParams.update({'font.size': 16})
+fig = plt.figure(figsize=(16,16))
+family_list = sum_is_group['signal_family'].unique()
+for i in range(len(family_list)):
+    ax = fig.add_subplot(2,2,i+1)
+    family_cur = family_list[i]
+    # line at zero
+    ax.axhline(y=0, color='black', alpha=0.7, linestyle='-', linewidth=1) 
+    temp = sum_is_group.query("signal_family == @family_cur").copy()
+    ax.plot(temp['is_group'], temp['ret_is'], color='grey', alpha=0.7)
+    # ax.scatter(temp['is_group'], temp['ret_oos'], color='blue', alpha=0.7)
+    ax.errorbar(temp['is_group'], temp['ret_oos'], yerr=temp['ret_oos_se'], fmt='o', color='blue', alpha=0.7)
+    ax.plot(temp['is_group'], temp['ret_pred'], color='red', alpha=0.7)
+    # label
+    ax.set_title(family_cur + ' ' + str(mean_begin) + '-' + str(mean_end))
+    ax.set_xlabel('is group')
+    ax.set_ylabel('mean return')
+    ax.legend(['zero','is', 'pred', 'oos'], loc='upper left')
+    # add decay by family text
+    decay_oos = family_decay.loc[family_cur, 'decay_oos']
+    decay_pred = family_decay.loc[family_cur, 'decay_pred']
+    ax.text(0.6, 0.1, 'decay oos = ' + str(round(decay_oos,2)) + '\n' + \
+            'decay pred = ' + str(round(decay_pred,2)), transform=ax.transAxes
+            , color = 'blue')
+    # fix y limits
+    ax.set_ylim(y_lim_all)
+    ax.set_xlabel('in-sample return group')
+    ax.set_ylabel('out-of-sample return')     
+
+# save as pdf
+plt.savefig(str(path_figs) + '/shrinkage_vs_oos_cross_pre2004.pdf', bbox_inches="tight")
 
 #%% Measure decay by ols each year, take means, then plot
 # follows Chen Velikov Figure 6
@@ -187,6 +268,8 @@ for i in range(len(family_list)):
     temp = rollfamily2.query("signal_family == @family_cur").copy()
     ax.plot(temp['oos_begin_year'], temp['shrinkage'], color='red', alpha=0.7)
     ax.plot(temp['oos_begin_year'], temp['oos_decay'], color='blue', alpha=0.7)
+    # add scatter
+    ax.scatter(temp['oos_begin_year'], temp['oos_decay'], color='blue', alpha=0.7)
     # label
     ax.set_title(family_cur)
     ax.set_xlabel('oos begin year')
@@ -196,11 +279,10 @@ for i in range(len(family_list)):
     ax.set_ylim([-1,2])
     # guide lines at 0 and 1
     ax.axhline(y=0, color='black', alpha=0.7, linestyle='--')
-    ax.axhline(y=1, color='black', alpha=0.7, linestyle='--')
-
+    ax.axhline(y=1, color='black', alpha=0.7, linestyle='--')    
 
 # save as pdf
-plt.savefig(str(path_figs) + '/decay_by_year.pdf', bbox_inches="tight")
+plt.savefig(str(path_figs) + '/shrinkage_vs_decay_ts.pdf', bbox_inches="tight")
 
 #%% Let the user know whats up
 

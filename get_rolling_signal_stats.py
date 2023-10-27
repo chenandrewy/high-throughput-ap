@@ -44,7 +44,7 @@ if MachineUsed==1: # Chuks
     path_tables = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Tables/')
 elif MachineUsed==2: # Andrew 
 
-    CPUUsed = 8
+    # CPUUsed = 8
 
     # get working directory
     path_root = Path(os.getcwd() + '/../../')
@@ -57,9 +57,11 @@ elif MachineUsed==2: # Andrew
 # Statistical choices
 MIN_YEAR = 1963
 IS_N_YEARS = 20 # number of years in in-sample period
+OOS_BEGIN_YEAR_START = 1983 # start of oos period
 OOS_N_YEARS = 1 # number of years in oos period
 MAX_LAGS = 0 # for standard error correction
 formula = 'ret ~ 1' # formula for performance measurement
+
 
 # define minimum number of observations for each signal in the in-sample
 if IS_N_YEARS > 3:
@@ -72,8 +74,6 @@ if OOS_N_YEARS > 3:
     OOS_MIN_OBS = 36 
 else:
     OOS_MIN_OBS = OOS_N_YEARS * 12
-
-
 
 # %% Define Functions
 
@@ -116,11 +116,18 @@ for name in tqdm(signal_family_names):
         
     df['year'] = df['date'].dt.year
     signal_dic[name] = df[['signalid', 'date', 'year', 'ret']].sort_values(['signalid', 'date'])
-    
-    
+     
 #%% get mean return and tstats for rolling in-sample and out-of-sample period
 
 signal_tstats = []
+
+# find last year for each signal family
+last_year_ok = 4000
+for name in tqdm(signal_family_names):
+    df = signal_dic[name]
+    temp = min([df['year'].max() for df in signal_dic.values()])
+    last_year_ok = min(last_year_ok, temp)    
+last_year_ok = last_year_ok - OOS_N_YEARS
 
 # compute alphas and t-stats in parallel
 with Parallel(n_jobs=CPUUsed, verbose=5) as parallel:
@@ -128,7 +135,7 @@ with Parallel(n_jobs=CPUUsed, verbose=5) as parallel:
         
         print(f'Process Started {name}')
         
-        for oos_begin_yr in range(1993, 2018):
+        for oos_begin_yr in range(OOS_BEGIN_YEAR_START, last_year_ok):
         
             print(f'OOS begin year: {oos_begin_yr}')
             oos_end_yr = oos_begin_yr + OOS_N_YEARS
@@ -165,4 +172,6 @@ signal_tstats = signal_tstats.drop(columns=['alpha'])
 #%%  save data
 
 signal_tstats.to_csv(path_output / f'OOS_signal_tstat_OosNyears{OOS_N_YEARS}.csv.gzip')
+
+print('saved csv to ' + str(path_output))
 
