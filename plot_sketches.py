@@ -323,8 +323,9 @@ for i in range(len(family_list)):
     family_cur = family_list[i]
     temp = sum_is_group.query("signal_family == @family_cur").copy()    
 
-    # choose standard error (I suppose we could use instead sqrt(pq/n))
-    temp['SE_oos'] = temp['SD_Pr_oos_lt_h'] / np.sqrt(temp['nobs'])
+    # choose standard error 
+    # (I suppose we could use instead sqrt(pq/n))
+    temp['SE_oos'] = n_se_plot*temp['SD_Pr_oos_lt_h'] / np.sqrt(temp['nobs'])
     
     # main plots
     ax.plot(temp['is_group'], temp['FDR_UB'], color='red', alpha=0.7)
