@@ -24,6 +24,7 @@ from joblib import Parallel, delayed
 from multiprocessing import Pool, cpu_count
 import warnings
 
+
 # %% set up / user input
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -35,11 +36,11 @@ if cpu_count()>30:
 else:
     CPUUsed = cpu_count()-2
 
-MachineUsed = 2
+MachineUsed = 1
 
 if MachineUsed==1: # Chuks 
-    path_input = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Andrew/Data/')
-    path_output = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Andrew/Data/')
+    path_input = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/')
+    path_output = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/')
     path_figs = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Figures/')
     path_tables = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Tables/')
 elif MachineUsed==2: # Andrew 
@@ -49,10 +50,12 @@ elif MachineUsed==2: # Andrew
     # get working directory
     path_root = Path(os.getcwd() + '/../../')
 
-    path_input = Path(path_root / 'Andrew/Data/')
-    path_output = Path(path_root / 'Andrew/Data/')
+    path_input = Path(path_root / 'Data/')
+    path_output = Path(path_root / 'Data/')
     path_figs = Path(path_root / 'Andrew/Figures/')
     path_tables = Path(path_root / 'Andrew/Tables/')    
+
+
 
 # Statistical choices
 MIN_YEAR = 1963
@@ -61,6 +64,7 @@ OOS_BEGIN_YEAR_START = 1983 # start of oos period
 OOS_N_YEARS = 1 # number of years in oos period
 MAX_LAGS = 0 # for standard error correction
 formula = 'ret ~ 1' # formula for performance measurement
+
 
 
 # define minimum number of observations for each signal in the in-sample
@@ -102,32 +106,53 @@ def get_alpha_tstat(s_id, df_sig, formula, oos_begin_year, oos_end_year):
 #%% load data
 
 # load family strategies data
-signal_family_names = ['ticker_Harvey2017JF_ew', 'ticker_Harvey2017JF_vw', 
-                       'DataMinedLongShortReturnsVW', 'DataMinedLongShortReturnsEW']
+signal_family_names = ['ticker_Harvey2017JF_ew.csv', 'ticker_Harvey2017JF_vw.csv', 
+                       'DataMinedLongShortReturnsVW.csv', 'DataMinedLongShortReturnsEW.csv',
+                       'PastReturnSignalsLongShort.csv.gzip',
+                       'RavenPackSignalsLongShort.csv.gzip'
+                       ]
+
 signal_dic = {}
 for name in tqdm(signal_family_names):
-    df = pd.read_csv(path_input / f'{name}.csv')
-    if name in ['DataMinedLongShortReturnsVW', 'DataMinedLongShortReturnsEW']:
+    df = pd.read_csv(path_input / f'{name}')
+    label = re.sub(r'\.csv(?:\.gzip)?', '', name) # get file name without file extension
+
+    if label in ['DataMinedLongShortReturnsVW', 'DataMinedLongShortReturnsEW']:
         df['day'] = 1
         df['date'] = pd.to_datetime(df[['year', 'month', 'day']])
-    elif name in ['ticker_Harvey2017JF_ew', 'ticker_Harvey2017JF_vw']: 
+    
+    elif label in ['ticker_Harvey2017JF_ew', 'ticker_Harvey2017JF_vw']: 
         df['signalid'], _ = pd.factorize(df['signalname'])
         df['date'] = pd.to_datetime(df['date']) - pd.offsets.MonthBegin() # makes dates to be first of each month
+    
+    elif label in ['PastReturnSignalsLongShort', 'RavenPackSignalsLongShort']:
+        df['date'] = pd.to_datetime(df['date']) - pd.offsets.MonthBegin() # makes dates to be first of each month
+        df['year'] = df['date'].dt.year
         
+        # retain signal-periods with at least 2 stocks in the long and short leg, respectively
+        df = df.query('nshort>=2 & nlong>=2')
+        
+        # seperate value-weighted and equal-weighted portolio returns as different datasets
+        signal_dic[f'{label}_ew'] = df[['signalid', 'date', 'year', 'ret_ew']].rename(
+            columns={'ret_ew': 'ret'}).sort_values(['signalid', 'date'])
+        
+        signal_dic[f'{label}_vw'] = df[['signalid', 'date', 'year', 'ret_vw']].rename(
+            columns={'ret_vw': 'ret'}).sort_values(['signalid', 'date'])
+        continue
+
+    
     df['year'] = df['date'].dt.year
-    signal_dic[name] = df[['signalid', 'date', 'year', 'ret']].sort_values(['signalid', 'date'])
+    signal_dic[label] = df[['signalid', 'date', 'year', 'ret']].sort_values(['signalid', 'date'])
+    
+    
      
 #%% get mean return and tstats for rolling in-sample and out-of-sample period
 
 signal_tstats = []
 
 # find last year for each signal family
-last_year_ok = 4000
-for name in tqdm(signal_family_names):
-    df = signal_dic[name]
-    temp = min([df['year'].max() for df in signal_dic.values()])
-    last_year_ok = min(last_year_ok, temp)    
-last_year_ok = last_year_ok - OOS_N_YEARS
+last_year_ok = min([df['year'].max() for name, df in signal_dic.items()]) - OOS_N_YEARS
+
 
 # compute alphas and t-stats in parallel
 with Parallel(n_jobs=CPUUsed, verbose=5) as parallel:
@@ -144,13 +169,19 @@ with Parallel(n_jobs=CPUUsed, verbose=5) as parallel:
             # select that starting from in-sample begin year
             # and keep only signals with enough observations
             df_use = df.query('@is_begin_yr <= year <= @oos_end_yr').copy()
-            
+            if len(df_use)==0:
+                continue
+
             # execute procedure in parallel
             df_alpha = parallel(delayed(get_alpha_tstat)(s_id, df_sig, formula, oos_begin_yr, oos_end_yr)
                                   for s_id, df_sig in df_use.groupby('signalid'))
             
             # unpack list of lists
             df_alpha = [ls for sub_ls in df_alpha for ls in sub_ls]
+            
+            # check if any of the results in non-empty
+            if sum(map(len, df_alpha)) == 0:
+                continue
             
             # convert to data frame and include identifiers
             col_names = ['signalid', 'mean_ret', 'alpha', 'tstat', 'nobs', 's_flag']
