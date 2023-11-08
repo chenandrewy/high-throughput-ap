@@ -62,6 +62,13 @@ yearlist = unique(rollsignal1$oos_begin_year)
 
 # function for fitting t-stats
 fit_fam = function(tstatvec, fam){
+
+    # if variance overall < 1, assume null
+    if (var(tstatvec) < 1){
+        par = tibble(mu = 0, sigma = 1, lambda = 1)
+        return(par)
+    }
+
     if (fam %in% c('pastret_ew', 'pastret_vw')){
         # fit mixture normal
         mixfit = normalmixEM(tstatvec, k = 2, maxit = 1000, epsilon = 1e-3)
@@ -72,15 +79,10 @@ fit_fam = function(tstatvec, fam){
         par = tibble(mu = mean(tstatvec), sigma = sd(tstatvec), lambda = 1)         
         return(par)
     }
+    
+
 } # end fit_fam
 
-    # # debug
-    # fit_fam = function(tstatvec, fam){
-    #     # fit normal
-    #     par = tibble(mu = mean(tstatvec), sigma = sd(tstatvec), lambda = 1)         
-    #     par$mu = 0
-    #     return(par)
-    # } # end fit_fam
 
 # function for simulating t-stats 
 sim_fam = function(par, N = 1e4){
@@ -125,7 +127,6 @@ predict_fam = function(par, signaldt){
     return(signaldt)
 } # end predict_fam
 
-# Model t-stats at selected years ----------------------------------------
 
 # name families
 long_family_name = function(fam){
@@ -138,6 +139,10 @@ long_family_name = function(fam){
         , fam == 'ticker_vw' ~ 'Ticker VW'
     )
 }
+
+
+# Model t-stats at selected years ----------------------------------------
+
 
 tstat_dist_pdf = function(yearselect = 1983){
 
@@ -198,13 +203,6 @@ tstat_dist_pdf = function(yearselect = 1983){
             simnull %>% transmute(signal_family, signalid, tstat_is = tstat_sim) %>% 
             mutate(type = 'null')
         ) %>% 
-        # left_join(varlab, by = 'signal_family') %>% 
-        # mutate(
-        #     signal_family = paste0(signal_family
-        #     , ' var1=', round(var_1, 1)
-        #     , ' var2=', round(var_2, 1)
-        #     )
-        # )
         mutate(
             signal_family = long_family_name(signal_family)
             , type = case_when(
@@ -224,7 +222,9 @@ tstat_dist_pdf = function(yearselect = 1983){
             , position = 'identity', bins = 50, alpha = 0.6) +
         facet_wrap(~ signal_family, scales = "free_x", nrow = 3) +
         theme_bw() +
-        theme(legend.position = c(1,9.2)/10, legend.title = element_blank())  +
+        theme(legend.position = c(1,9)/10, legend.title = element_blank()
+            , text = element_text(size = 16)) +
+        theme(legend.text = element_text(size = 10)) +
         scale_fill_manual(values = c(MATBLUE,MATRED, 'white')
             , labels = c('Data', 'Model', 'Null')) +
         scale_color_manual(values = c(MATBLUE,MATRED, 'black')
@@ -242,8 +242,6 @@ tstat_dist_pdf(2004)
 tstat_dist_pdf(2020)
 
 # Predict returns each year ---------------------------
-
-
 
 # fit models each fam-year
 rollfit = list()
@@ -302,7 +300,9 @@ pdf_plot_rollpred = function(ngroup = 20, oos_freq_adj = 12, yearmin = 1983, yea
             xlab('in-sample return group') +
             ylab('Long-Short Return (% p.m.)') +
             theme_bw() +
-            theme(legend.position = c(1.3,9.3)/10, legend.title = element_blank())  +
+            theme(legend.position = c(1.7,9.45)/10, legend.title = element_blank()
+                , text = element_text(size = 18), legend.text = element_text(size = 12)
+                , legend.margin = margin(t=0, unit = 'cm'))  +
             scale_color_manual(
                 values = c(MATBLUE, MATRED)
                 , labels = c('Out-of-sample', 'Predicted')
@@ -321,6 +321,7 @@ pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 12, yearmin = 2020, yearmax = 2020
 
 # find the best signals across families  -----------------------
 # here we apply signs
+top_pct_select = c(1,5,10)
 
 # flip signs
 rollrank = rollpred %>% 
@@ -333,7 +334,7 @@ rollrank = rollpred %>%
 
 # define "best" strategies
 Nstratall = rollrank %>% distinct(signal_family, signalid) %>% nrow()
-rankdat = tibble(top_pct = c(0.1, 1, 5)) %>% 
+rankdat = tibble(top_pct = top_pct_select) %>% 
     mutate(top_rank = round(top_pct/100*Nstratall)) 
 
 # settings for best signals
@@ -390,7 +391,7 @@ ggsave(paste0(plot_path, 'sketch-cret.pdf'), p, scale = 0.5)
 
 # plot nicely for paper
 colorlist = c(MATBLUE, MATRED, MATYELLOW, MATPURPLE, MATGREEN)
-legtitle = 'Strats in Top'
+legtitle = 'Strategies in Top'
 p = retbest %>% 
     filter(famfilter == '1 all') %>%
     group_by(pctmin) %>%
@@ -407,7 +408,8 @@ p = retbest %>%
     scale_color_manual(values = colorlist, name = legtitle) +
     scale_linetype_manual(values = c(1,2,4), name = legtitle) +
     xlab(NULL) +
-    ylab('Log Cumulative Return') 
+    ylab('Log Cumulative Return')  +
+    coord_cartesian(xlim = c(1980, 2020))
 ggsave(paste0(plot_path, 'beststrats-cret.pdf'), p, scale = 0.2)
 
     
@@ -416,9 +418,9 @@ ggsave(paste0(plot_path, 'beststrats-cret.pdf'), p, scale = 0.2)
 # summarize to console ----------------------------
 retbest %>% 
     group_by(famfilter, rankmin) %>%
-    summarize(rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()) %>% 
+    summarize(rbar = 12*mean(ret_oos), vol = sd(12*ret_oos), nyear= n()) %>% 
     mutate(sharpe = rbar/vol) %>% 
-    mutate(tstat = rbar/vol*sqrt(nyear*12))
+    mutate(tstat = rbar/vol*sqrt(nyear))
 
 
 retbest %>% 
