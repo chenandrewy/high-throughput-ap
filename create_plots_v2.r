@@ -36,12 +36,16 @@ NICERED = "#F8766D"
 
 rollsignalfile = '../../Data/OOS_signal_tstat_OosNyears1.csv.gzip' # 20 years IS
 plot_path = '../Figures/'
+table_path = '../Tables/'
 
+ret_freq_adj = 12 # annualize
+  
 # Load data ----------------------------------------
 
 rollsignal0 <- fread(rollsignalfile) %>% 
     mutate(s_flag = tolower(s_flag)) %>% 
-    rename(ret = mean_ret) %>% mutate(
+    mutate(ret = ret_freq_adj*mean_ret) %>% 
+    mutate(
         signal_family = str_replace(signal_family, "PastReturnSignalsLongShort", "pastret")
         , signal_family = str_replace(signal_family, "DataMinedLongShortReturns", "acct_")
         , signal_family = str_replace(signal_family, "ticker_Harvey2017JF", "ticker")
@@ -82,8 +86,6 @@ fit_fam = function(tstatvec, fam){
     
 
 } # end fit_fam
-
-
 # function for simulating t-stats 
 sim_fam = function(par, N = 1e4){
     if (nrow(par) == 1){
@@ -93,7 +95,6 @@ sim_fam = function(par, N = 1e4){
     }
     return(tstat_sim)
 } # end sim_fam
-
 # function for shrinkage predictions
 predict_fam = function(par, signaldt){
     # signaldt has columns: signalid, tstat_is, ret_is
@@ -126,8 +127,6 @@ predict_fam = function(par, signaldt){
 
     return(signaldt)
 } # end predict_fam
-
-
 # name families
 long_family_name = function(fam){
     longname = case_when(
@@ -140,9 +139,7 @@ long_family_name = function(fam){
     )
 }
 
-
 # Model t-stats at selected years ----------------------------------------
-
 
 tstat_dist_pdf = function(yearselect = 1983){
 
@@ -264,10 +261,8 @@ rollfit = bind_rows(rollfit) %>% setDT()
 rollpred = bind_rows(rollpred) %>% setDT()
 
 # Plot by family / bin -------------------------------------------
-oos_freq_adj = 12
-ngroup = 20
 
-pdf_plot_rollpred = function(ngroup = 20, oos_freq_adj = 12, yearmin = 1983, yearmax = 2020){
+pdf_plot_rollpred = function(ngroup = 20, oos_freq_adj = 1, yearmin = 1983, yearmax = 2020){
     temp = rollpred %>% filter(oos_begin_year >= yearmin & oos_begin_year <= yearmax)
     yearrange = c(min(temp$oos_begin_year), max(temp$oos_begin_year))
 
@@ -296,9 +291,9 @@ pdf_plot_rollpred = function(ngroup = 20, oos_freq_adj = 12, yearmin = 1983, yea
                 , ymax = ret_oos + 1.96*se_ret_oos
                 , color = MATBLUE), width = 0.2) +
             facet_wrap(~ signal_family, scales = "free_x", nrow = 3) +
-            coord_cartesian(ylim = c(-1, 1)) +
+            coord_cartesian(ylim = c(-12, 12)) +
             xlab('in-sample return group') +
-            ylab('Long-Short Return (% p.m.)') +
+            ylab('Long-Short Return (% p.a.)') +
             theme_bw() +
             theme(legend.position = c(1.7,9.45)/10, legend.title = element_blank()
                 , text = element_text(size = 18), legend.text = element_text(size = 12)
@@ -313,10 +308,10 @@ pdf_plot_rollpred = function(ngroup = 20, oos_freq_adj = 12, yearmin = 1983, yea
 }
 
 # plot 
-pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 12, yearmin = 1983, yearmax = 2004)
-pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 12, yearmin = 2004, yearmax = 2020)
-pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 12, yearmin = 1983, yearmax = 2020)
-pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 12, yearmin = 2020, yearmax = 2020)
+pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 1, yearmin = 1983, yearmax = 2004)
+pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 1, yearmin = 2004, yearmax = 2020)
+pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 1, yearmin = 1983, yearmax = 2020)
+pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 1, yearmin = 2020, yearmax = 2020)
 
 
 # find the best signals across families  -----------------------
@@ -377,7 +372,7 @@ legtitle = 'best pct strats, pct='
 p = retbest %>% 
     group_by(famfilter, pctmin) %>% 
     arrange(famfilter, pctmin, oos_begin_year) %>%
-    mutate(logcret = cumsum(log(1+ret_oos/100*12))) %>%
+    mutate(logcret = cumsum(log(1+ret_oos/100))) %>%
     mutate(pctmin = paste0(pctmin, '%')) %>% 
     ggplot(aes(x = oos_begin_year, y = logcret, group = pctmin)) +
     geom_hline(yintercept = 0, color = 'grey') +
@@ -397,7 +392,7 @@ p = retbest %>%
     group_by(pctmin) %>%
     arrange(pctmin, oos_begin_year) %>%
     mutate(pctmin = paste0(pctmin, '%')) %>%     
-    mutate(logcret = cumsum(log(1+ret_oos/100*12))) %>%
+    mutate(logcret = cumsum(log(1+ret_oos/100))) %>%
     ggplot(aes(x = oos_begin_year, y = logcret, group = pctmin)) +
     geom_hline(yintercept = 0, color = 'grey') +
     geom_line(aes(color = pctmin, linetype = pctmin), size = 1) +
@@ -413,25 +408,91 @@ p = retbest %>%
 ggsave(paste0(plot_path, 'beststrats-cret.pdf'), p, scale = 0.2)
 
     
-
-
 # summarize to console ----------------------------
 retbest %>% 
-    group_by(famfilter, rankmin) %>%
-    summarize(rbar = 12*mean(ret_oos), vol = sd(12*ret_oos), nyear= n()) %>% 
+    group_by(famfilter, pctmin, rankmin) %>%
+    summarize(rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()) %>% 
     mutate(sharpe = rbar/vol) %>% 
     mutate(tstat = rbar/vol*sqrt(nyear))
 
 
 retbest %>% 
     mutate(subsamp = if_else(oos_begin_year <= 2004, 'pre-2004','post-2004') )%>%
-    group_by(famfilter, rankmin, subsamp) %>%
+    group_by(famfilter, rankmin, pctmin, subsamp) %>%
     summarize(rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()) %>% 
     mutate(sharpe = rbar/vol) %>% 
-    mutate(tstat = rbar/vol*sqrt(nyear*12)) %>% 
-    print(n=Inf)
+    mutate(tstat = rbar/vol*sqrt(nyear)) %>% 
+    arrange(rankmin, subsamp, famfilter) %>% 
+    print(n=Inf) 
+    
 
-# inspect ----------------------------
+# Latex Table of best returns  ----------------------------
 
-rollfit[signal_family == 'pastret_vw' & oos_begin_year == 2019]
-rollfit[oos_begin_year == 2019]
+
+library(xtable)
+
+samp_split = 2004
+
+samp_start = retbest$oos_begin_year %>% min()
+samp_end = retbest$oos_begin_year %>% max()
+
+tabdat = retbest %>% 
+    filter(famfilter == '1 all') %>%
+    mutate(subsamp = if_else(oos_begin_year <= samp_split
+        , paste0(samp_start, '-', samp_split), paste0(samp_split+1, '-', samp_end)) ) %>%
+    group_by(pctmin, rankmin, subsamp) %>%
+    summarize( rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()
+        , sharpe = rbar/vol, tstat = rbar/vol*sqrt(nyear)) %>% 
+    rbind(
+        retbest %>% filter(famfilter == '1 all') %>%
+        mutate(subsamp = paste0(samp_start, '-', samp_end)) %>%
+        group_by(pctmin, rankmin, subsamp) %>%
+        summarize( rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()
+            , sharpe = rbar/vol, tstat = rbar/vol*sqrt(nyear)) 
+    ) 
+
+# add header rows
+tabdat2 = tabdat %>% 
+    mutate(pctmin = pctmin %>% as.character() %>% as.numeric()) %>% 
+    rbind(
+        tibble(subsamp = tabdat$subsamp %>% unique())
+    ) %>% 
+    mutate(pctmin = if_else(is.na(pctmin), 0, pctmin)) %>% 
+    mutate(sampid = case_when(subsamp == '1983-2020' ~ 1
+            , subsamp == '1983-2004' ~ 2
+            , subsamp == '2005-2020' ~ 3)) %>%     
+    arrange(sampid, pctmin) %>% 
+    mutate(pctmin = paste0('Top ', pctmin, '\\%')) 
+
+xtable(tabdat2 %>% 
+        select(pctmin, rankmin, rbar, tstat, sharpe) 
+    , digits = c(0,0,0,2,2,2), align = 'llrccc') %>%
+    print(include.rownames = FALSE, 
+        , sanitize.text.function = function(x){x}) %>% 
+        cat(file = paste0(table_path, 'beststrats.tex'))
+
+# read in tex and edit
+texline = readLines(paste0(table_path,'beststrats.tex'))
+
+texline[7] = ' & Number of & Mean Return & t-stat & Sharpe Ratio \\\\'
+texline[8] = ' & \\multicolumn{1}{c}{Strategies} & \\multicolumn{1}{c}{(\\% ann)} & & (ann) \\\\ \\hline'
+
+templeft = '\\multicolumn{4}{l}{'
+tempright = '}\\\\ \\hline'
+
+texline[9] = paste0(templeft, '1983-2020', tempright)
+texline[13] = paste0(templeft, '1983-2004', tempright)
+texline[17] = paste0(templeft, '2005-2020', tempright)
+
+# remove table environment
+texline2 = texline[-c(3,4,23)]
+
+# add extra spaces
+texline2[10] = paste0(texline2[10], ' \\\\')
+texline2[14] = paste0(texline2[14], ' \\\\')
+
+texline2
+
+writeLines(texline2, paste0(table_path,'beststrats.tex'))
+
+
