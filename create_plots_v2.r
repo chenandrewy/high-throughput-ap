@@ -376,7 +376,7 @@ pdf_plot_rollpred_is(ngroup = 20, oos_freq_adj = 1, yearmin = 2020, yearmax = 20
 
 # Find the best strats and plot -----------------------
 # here we apply signs
-top_pct_select = c(1,5,10)
+top_pct_select = c(0.5, 1,5,10)
 
 # flip signs
 rollrank = rollpred %>% 
@@ -420,7 +420,7 @@ for (famfilteri in 1:length(famfilterlist)){
             filter(rank <= rankx) %>%
             group_by(famfilter, oos_begin_year) %>%
             summarize(ret_oos = mean(ret_oos)) %>% 
-            mutate(rankmin = as.factor(rankx)) %>% 
+            mutate(nstrat = as.factor(rankx)) %>% 
             mutate(pctmin = as.factor(rankdat[ rankdat$top_rank == rankx, ]$top_pct))
 
         retbest = rbind(retbest, temp)
@@ -444,38 +444,16 @@ p = retbest %>%
 
 ggsave(paste0(plot_path, 'sketch-cret.pdf'), p, scale = 0.5)
 
-# plot nicely for paper
-colorlist = c(MATBLUE, MATRED, MATYELLOW, MATPURPLE, MATGREEN)
-legtitle = 'Strategies in Top'
-p = retbest %>% 
-    filter(famfilter == '1 all') %>%
-    group_by(pctmin) %>%
-    arrange(pctmin, oos_begin_year) %>%
-    mutate(pctmin = paste0(pctmin, '%')) %>%     
-    mutate(logcret = cumsum(log(1+ret_oos/100))) %>%
-    ggplot(aes(x = oos_begin_year, y = logcret, group = pctmin)) +
-    geom_hline(yintercept = 0, color = 'grey') +
-    geom_line(aes(color = pctmin, linetype = pctmin), size = 1) +
-    theme_bw() +
-    theme(legend.position = c(2,8)/10
-        , text = element_text(size = 20)
-        , legend.key.size = unit(2,'line')) +
-    scale_color_manual(values = colorlist, name = legtitle) +
-    scale_linetype_manual(values = c(1,2,4), name = legtitle) +
-    xlab(NULL) +
-    ylab('Log Cumulative Return')  +
-    coord_cartesian(xlim = c(1980, 2020))
-ggsave(paste0(plot_path, 'beststrats-logcret.pdf'), p, scale = 0.2)
-
 # plot in levels
 colorlist = c(MATBLUE, MATRED, MATYELLOW, MATPURPLE, MATGREEN)
 legtitle = 'Using Strats in Top'
 p =  retbest %>% 
     filter(famfilter == '1 all') %>%
+    filter(pctmin %in% c(0.5,1,5)) %>%     
     group_by(pctmin) %>%
     arrange(pctmin, oos_begin_year) %>%
     mutate(pctmin = paste0(pctmin, '%')) %>%     
-    mutate(pctmin = factor(pctmin, levels = c('1%', '5%', '10%'))) %>%
+    mutate(pctmin = factor(pctmin, levels = c('0.5%', '1%', '5%'))) %>%
     mutate(cret = cumprod(1+ret_oos/100)) %>%
     ggplot(aes(x = oos_begin_year, y = cret, group = pctmin)) +
     geom_hline(yintercept = 0, color = 'grey') +
@@ -495,18 +473,18 @@ ggsave(paste0(plot_path, 'beststrats-cret.pdf'), p, scale = 0.5)
     
 # summarize to console ----------------------------
 retbest %>% 
-    group_by(famfilter, pctmin, rankmin) %>%
+    group_by(famfilter, pctmin, nstrat) %>%
     summarize(rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()) %>% 
     mutate(sharpe = rbar/vol) %>% 
     mutate(tstat = rbar/vol*sqrt(nyear))
 
 retbest %>% 
     mutate(subsamp = if_else(oos_begin_year <= 2004, 'pre-2004','post-2004') )%>%
-    group_by(famfilter, rankmin, pctmin, subsamp) %>%
+    group_by(famfilter, nstrat, pctmin, subsamp) %>%
     summarize(rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()) %>% 
     mutate(sharpe = rbar/vol) %>% 
     mutate(tstat = rbar/vol*sqrt(nyear)) %>% 
-    arrange(rankmin, subsamp, famfilter) %>% 
+    arrange(nstrat, subsamp, famfilter) %>% 
     print(n=Inf) 
     
 # Latex Table of best returns  ----------------------------
@@ -514,40 +492,87 @@ retbest %>%
 library(xtable)
 
 samp_split = 2004
-
 samp_start = retbest$oos_begin_year %>% min()
 samp_end = retbest$oos_begin_year %>% max()
 
-tabdat = retbest %>% 
-    filter(famfilter == '1 all') %>%
+# for comparison, read in CZ returns
+pubret0 = fread('../../Data/PredictorLSretWide.csv')
+pubdoc = readxl::read_excel('../../Data/PredictorSummary.xlsx') %>% 
+    transmute(signalname, pubyear = Year, sampend = SampleEndYear)
+
+# process CZ returns 
+pubret = melt(pubret0, id.vars = 'date'
+    , variable.name = 'signalname'
+    , value.name = 'ret') %>% 
+    filter(!is.na(ret)) %>% 
+    left_join(pubdoc, by = 'signalname') %>% 
+    mutate(year = year(date)) %>%
+    filter(year >= samp_start & year <= samp_end) 
+
+# note we should annualize better later
+pubcomb = pubret %>%     
+    group_by(year, signalname) %>% summarize(ret = 12*mean(ret)) %>%
+    group_by(year) %>% summarize(ret = mean(ret), nstrat = n()) %>% 
+    mutate(name = 'pubcomb') %>% 
+    rbind(
+        pubret %>%     
+        filter(pubyear <= samp_split) %>%
+        group_by(year, signalname) %>% summarize(ret = 12*mean(ret)) %>%
+        group_by(year) %>% summarize(ret = mean(ret), nstrat = n()) %>% 
+        mutate(name = 'pub_pre2004') 
+    )
+
+
+
+# add to retbest
+retbest2 = retbest %>% 
+    filter(famfilter == '1 all') %>%  
+    rbind(pubcomb %>% transmute(
+            famfilter = '1 all', oos_begin_year = year, ret_oos = ret
+            , nstrat, pctmin = name)) %>% 
+    mutate(pctmin = pctmin %>% as.character()
+        , nstrat = nstrat %>% as.character() %>% as.numeric()) %>% 
+    mutate(pctmin = factor(pctmin, levels = c('0.5','1','5','10','pubcomb','pub_pre2004')
+        , labels = c('DM Top 0.5\\%', 'DM Top 1\\%', 'DM Top 5\\%', 'DM Top 10\\%'
+            , 'Pub Anytime', 'Pub Pre-2004'))) 
+
+tabdat = retbest2 %>% 
+    # subsample stats
     mutate(subsamp = if_else(oos_begin_year <= samp_split
         , paste0(samp_start, '-', samp_split), paste0(samp_split+1, '-', samp_end)) ) %>%
-    group_by(pctmin, rankmin, subsamp) %>%
+    group_by(pctmin, subsamp) %>%
     summarize( rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()
-        , sharpe = rbar/vol, tstat = rbar/vol*sqrt(nyear)) %>% 
+        , sharpe = rbar/vol, tstat = rbar/vol*sqrt(nyear), nstrat = mean(nstrat)) %>% 
+    # add overall stats
     rbind(
-        retbest %>% filter(famfilter == '1 all') %>%
+        retbest2 %>% 
         mutate(subsamp = paste0(samp_start, '-', samp_end)) %>%
-        group_by(pctmin, rankmin, subsamp) %>%
+        group_by(pctmin, subsamp) %>%
         summarize( rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()
-            , sharpe = rbar/vol, tstat = rbar/vol*sqrt(nyear)) 
-    ) 
-
-# add header rows
-tabdat2 = tabdat %>% 
-    mutate(pctmin = pctmin %>% as.character() %>% as.numeric()) %>% 
-    rbind(
-        tibble(subsamp = tabdat$subsamp %>% unique())
+            , sharpe = rbar/vol, tstat = rbar/vol*sqrt(nyear), nstrat = mean(nstrat)) 
     ) %>% 
-    mutate(pctmin = if_else(is.na(pctmin), 0, pctmin)) %>% 
+    # organize
     mutate(sampid = case_when(subsamp == '1983-2020' ~ 1
             , subsamp == '1983-2004' ~ 2
             , subsamp == '2005-2020' ~ 3)) %>%     
     arrange(sampid, pctmin) %>% 
-    mutate(pctmin = paste0('Top ', pctmin, '\\%')) 
+    ungroup()
 
+# add header rows
+tabdat2 = tabdat %>% rbind(
+    tabdat %>% distinct(subsamp, .keep_all = TRUE) %>% 
+        mutate(across(-c(subsamp,sampid), function(x) {return(NA)})
+            , pctmin = 'blank') 
+    )  %>% 
+    mutate(pctmin = factor(pctmin, 
+        levels = c('blank',levels(tabdat$pctmin)))) %>% 
+    arrange(sampid, pctmin)  %>% 
+    # clean up
+    filter(!grepl('DM Top 0.5', pctmin))
+
+# output tex
 xtable(tabdat2 %>% 
-        select(pctmin, rankmin, rbar, tstat, sharpe) 
+        select(pctmin, nstrat, rbar, tstat, sharpe) 
     , digits = c(0,0,0,2,2,2), align = 'llrccc') %>%
     print(include.rownames = FALSE, 
         , sanitize.text.function = function(x){x}) %>% 
@@ -557,23 +582,34 @@ xtable(tabdat2 %>%
 texline = readLines(paste0(table_path,'beststrats.tex'))
 
 texline[7] = ' & Num Strats & Mean Return & t-stat & Sharpe Ratio \\\\'
-texline[8] = ' & \\multicolumn{1}{c}{Used} & \\multicolumn{1}{c}{(\\% ann)} & & (ann) \\\\ \\hline'
+texline[8] = ' & \\multicolumn{1}{c}{Combined} & \\multicolumn{1}{c}{(\\% ann)} & & (ann) \\\\ \\hline'
 
+# find blanks
+blankrow = which(grepl('blank', texline))
 templeft = '\\multicolumn{4}{l}{'
 tempright = '}\\\\ \\hline'
-
-texline[9] = paste0(templeft, '1983-2020', tempright)
-texline[13] = paste0(templeft, '1983-2004', tempright)
-texline[17] = paste0(templeft, '2005-2020', tempright)
+tempmid = tabdat2$subsamp %>% unique()
+for (i in 1:length(blankrow)){
+    texline[blankrow[[i]]] = paste0(templeft, tempmid[[i]], tempright)
+}
 
 # remove table environment
-texline2 = texline[-c(3,4,23)]
+texline = texline[-c(3,4,length(texline))]
 
-# add extra spaces
-texline2[10] = paste0(texline2[10], ' \\\\')
-texline2[14] = paste0(texline2[14], ' \\\\')
+# == cosmetics ==
+texline2 = texline
 
-texline2
+# add extra spaces 
+rowlist = which(grepl('Pub Pre-2004', texline2))
+for (i in 1:(length(rowlist)-1)){
+    texline2[rowlist[[i]]] = paste0(texline2[rowlist[[i]]], '\\hline \\\\')
+}
+
+# add extra guide lines
+rowlist = which(grepl('Pub Any', texline2)) - 1
+for (i in rowlist){
+    texline2[i] = paste0(texline2[i], ' \\hline')
+}
 
 writeLines(texline2, paste0(table_path,'beststrats.tex'))
 
