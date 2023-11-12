@@ -141,7 +141,7 @@ long_family_name = function(fam){
 
 # Model t-stats at selected years ----------------------------------------
 
-tstat_dist_pdf = function(yearselect = 1983){
+tstat_dist_pdf = function(yearselect = 1983, ylimit = c(0,0.6)){
 
     # keep only first oos_begin_year for each signal_family and s_flag
     signalcur = rollsignal1 %>% 
@@ -219,7 +219,8 @@ tstat_dist_pdf = function(yearselect = 1983){
             , position = 'identity', bins = 50, alpha = 0.6) +
         facet_wrap(~ signal_family, scales = "free_x", nrow = 3) +
         theme_bw() +
-        theme(legend.position = c(1,9)/10, legend.title = element_blank()
+        theme(legend.position = c(1,9.3)/10
+            , legend.title = element_blank()
             , text = element_text(size = 16)) +
         theme(legend.text = element_text(size = 10)) +
         scale_fill_manual(values = c(MATBLUE,MATRED, 'white')
@@ -227,16 +228,17 @@ tstat_dist_pdf = function(yearselect = 1983){
         scale_color_manual(values = c(MATBLUE,MATRED, 'black')
             , labels = c('Data', 'Model', 'Null'))  +
         xlab('t-statistic') +
-        coord_cartesian(xlim = c(-1,1)*6, ylim = c(0,0.9)) +
+        coord_cartesian(xlim = c(-1,1)*6, ylim = ylimit) +
         scale_x_continuous(breaks = seq(-10, 10, 2)) 
-    ggsave(paste0(plot_path, 'tstat-hist-', yearselect, '.pdf'), p, scale = 0.5)
+    ggsave(paste0(plot_path, 'tstat-hist-', yearselect, '.pdf')
+            , p, scale = 1, height = 8, width = 6)
 
 } # end tstat_dist_pdf
 
 # run plotting function for select years
-tstat_dist_pdf(1983)
-tstat_dist_pdf(2004)
-tstat_dist_pdf(2020)
+tstat_dist_pdf(1983, ylimit = c(0,0.6))
+tstat_dist_pdf(2004, ylimit = c(0,0.8))
+tstat_dist_pdf(2020, ylimit = c(0,0.8))
 
 # Predict returns each year ---------------------------
 
@@ -313,8 +315,66 @@ pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 1, yearmin = 2004, yearmax = 2020)
 pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 1, yearmin = 1983, yearmax = 2020)
 pdf_plot_rollpred(ngroup = 20, oos_freq_adj = 1, yearmin = 2020, yearmax = 2020)
 
+# Plot by family / bin + in-sample ret -------------------------------------------
 
-# find the best signals across families  -----------------------
+pdf_plot_rollpred_is = function(ngroup = 20, oos_freq_adj = 1, yearmin = 1983, yearmax = 2020){
+    temp = rollpred %>% filter(oos_begin_year >= yearmin & oos_begin_year <= yearmax)
+    yearrange = c(min(temp$oos_begin_year), max(temp$oos_begin_year))
+
+    p = temp %>% 
+            group_by(signal_family, oos_begin_year) %>%
+            mutate(bin = ntile(ret_is, ngroup)) %>%
+            group_by(signal_family, oos_begin_year, bin) %>% 
+            summarize(
+                pred_ret = mean(pred_ret)
+                , ret_is = mean(ret_is)
+                , ret_oos = mean(ret_oos)
+            ) %>% 
+            group_by(signal_family, bin) %>% 
+            summarize(
+                pred_ret = mean(pred_ret)
+                , se_ret_oos = sd(ret_oos)/sqrt(n()*oos_freq_adj)
+                , ret_is = mean(ret_is)
+                , ret_oos = mean(ret_oos)
+            )  %>% 
+            mutate(signal_family = long_family_name(signal_family)) %>% 
+            ggplot(aes(x = bin)) +
+            geom_hline(yintercept = 0, color = 'lightgray') +            
+            # plot line / errorbar
+            geom_line(aes(y = ret_is, color = 'gray')
+                , linetype = 'dashed', size = 0.8) +            
+            geom_point(aes(y = ret_oos, color = MATBLUE)) +
+            geom_line(aes(y = pred_ret, color = MATRED), size = 0.8) +                             
+            geom_errorbar(aes(ymin = ret_oos - 1.96*se_ret_oos
+                , ymax = ret_oos + 1.96*se_ret_oos
+                , color = MATBLUE), width = 0.2) +
+            facet_wrap(~ signal_family, scales = "free_x", nrow = 3) +
+            coord_cartesian(ylim = c(-12, 12)) +
+            xlab('in-sample return group') +
+            ylab('Long-Short Return (% ann)') +
+            theme_bw() +
+            theme(legend.position = c(1.3,9.37)/10
+                , legend.title = element_blank()
+                , text = element_text(size = 18)
+                , legend.text = element_text(size = 8)
+                , legend.margin = margin(t=-0.1, unit = 'cm')
+                , legend.key = element_rect(fill = 'transparent')
+                , legend.box.background = element_blank()) +
+            scale_color_manual(
+                values = c(MATBLUE, MATRED, 'gray40')
+                , labels = c('OOS', 'Predicted', 'In-Samp')
+            ) 
+    ggsave(paste0(plot_path, 'pred-vs-oos-withIS-', yearrange[1], '-', yearrange[2], '.pdf'), p
+        , scale = 1, width = 6, height = 8)
+}
+
+# plot 
+pdf_plot_rollpred_is(ngroup = 20, oos_freq_adj = 1, yearmin = 1983, yearmax = 2004)
+pdf_plot_rollpred_is(ngroup = 20, oos_freq_adj = 1, yearmin = 2004, yearmax = 2020)
+pdf_plot_rollpred_is(ngroup = 20, oos_freq_adj = 1, yearmin = 1983, yearmax = 2020)
+pdf_plot_rollpred_is(ngroup = 20, oos_freq_adj = 1, yearmin = 2020, yearmax = 2020)
+
+# Find the best strats and plot -----------------------
 # here we apply signs
 top_pct_select = c(1,5,10)
 
@@ -405,7 +465,32 @@ p = retbest %>%
     xlab(NULL) +
     ylab('Log Cumulative Return')  +
     coord_cartesian(xlim = c(1980, 2020))
-ggsave(paste0(plot_path, 'beststrats-cret.pdf'), p, scale = 0.2)
+ggsave(paste0(plot_path, 'beststrats-logcret.pdf'), p, scale = 0.2)
+
+# plot in levels
+colorlist = c(MATBLUE, MATRED, MATYELLOW, MATPURPLE, MATGREEN)
+legtitle = 'Using Strats in Top'
+p =  retbest %>% 
+    filter(famfilter == '1 all') %>%
+    group_by(pctmin) %>%
+    arrange(pctmin, oos_begin_year) %>%
+    mutate(pctmin = paste0(pctmin, '%')) %>%     
+    mutate(pctmin = factor(pctmin, levels = c('1%', '5%', '10%'))) %>%
+    mutate(cret = cumprod(1+ret_oos/100)) %>%
+    ggplot(aes(x = oos_begin_year, y = cret, group = pctmin)) +
+    geom_hline(yintercept = 0, color = 'grey') +
+    geom_line(aes(color = pctmin, linetype = pctmin), size = 1)  +
+    theme_bw() +
+    theme(legend.position = c(2.5,8)/10
+        , text = element_text(size = 20), legend.title = element_text(size = 14)
+        , legend.key.size = unit(2,'line')) +
+    scale_color_manual(values = colorlist, name = legtitle) +
+    scale_linetype_manual(values = c(1,2,4), name = legtitle) +
+    xlab(NULL) +
+    ylab('Value of $1 Invested in 1983')  +
+    coord_cartesian(xlim = c(1980, 2020)) +
+    scale_y_continuous(trans='log10', breaks = 0:10)
+ggsave(paste0(plot_path, 'beststrats-cret.pdf'), p, scale = 0.5)
 
     
 # summarize to console ----------------------------
@@ -414,7 +499,6 @@ retbest %>%
     summarize(rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()) %>% 
     mutate(sharpe = rbar/vol) %>% 
     mutate(tstat = rbar/vol*sqrt(nyear))
-
 
 retbest %>% 
     mutate(subsamp = if_else(oos_begin_year <= 2004, 'pre-2004','post-2004') )%>%
@@ -425,9 +509,7 @@ retbest %>%
     arrange(rankmin, subsamp, famfilter) %>% 
     print(n=Inf) 
     
-
 # Latex Table of best returns  ----------------------------
-
 
 library(xtable)
 
@@ -474,8 +556,8 @@ xtable(tabdat2 %>%
 # read in tex and edit
 texline = readLines(paste0(table_path,'beststrats.tex'))
 
-texline[7] = ' & Number of & Mean Return & t-stat & Sharpe Ratio \\\\'
-texline[8] = ' & \\multicolumn{1}{c}{Strategies} & \\multicolumn{1}{c}{(\\% ann)} & & (ann) \\\\ \\hline'
+texline[7] = ' & Num Strats & Mean Return & t-stat & Sharpe Ratio \\\\'
+texline[8] = ' & \\multicolumn{1}{c}{Used} & \\multicolumn{1}{c}{(\\% ann)} & & (ann) \\\\ \\hline'
 
 templeft = '\\multicolumn{4}{l}{'
 tempright = '}\\\\ \\hline'
@@ -495,4 +577,119 @@ texline2
 
 writeLines(texline2, paste0(table_path,'beststrats.tex'))
 
+# HLZ's preferred Benji-Yeki Theorem 1.3 control -------------------------------------------
+options(tibble.width = Inf)
 
+# Estimate FDR bounds
+tempsum = rollsignal1 %>% 
+    group_by(signal_family, oos_begin_year) %>%
+    summarize(Nstrat = n()) %>% 
+    group_by(signal_family, oos_begin_year) %>%
+    mutate(BY1.3_penalty = sum(1/(1:Nstrat))) 
+
+rollsignalFDR = rollsignal1 %>% 
+    left_join(tempsum, by = c('signal_family', 'oos_begin_year')) %>%
+    group_by(signal_family, oos_begin_year) %>%
+    mutate(tabs_is = abs(tstat_is)) %>%
+    arrange(signal_family, oos_begin_year, desc(tabs_is)) %>% 
+    mutate(
+         Pr_null = 2*pnorm(-tabs_is)
+        , Pr_emp = row_number()/Nstrat
+        , FDRmax_BH = Pr_null/Pr_emp
+        , FDRmax_BY1.3 = FDRmax_BH*BY1.3_penalty
+    ) 
+
+# find t-stat hurdles
+crit_list = c(1, 5, 10) / 100
+rollfamFDR = list()
+for (crit in crit_list){
+    rollfamFDR[[as.character(crit)]] = rollsignalFDR %>% 
+        group_by(signal_family, oos_begin_year) %>%
+        filter(FDRmax_BY1.3 <= crit) %>%
+        summarize(tabs_hurdle = min(tabs_is)) %>% 
+        mutate(crit_level = crit)
+}
+rollfamFDR = bind_rows(rollfamFDR) %>% setDT()
+
+# define hurdle as max(tstat_is)+1 if no signals pass
+rollfamFDR = rollsignalFDR %>% 
+    group_by(signal_family, oos_begin_year) %>%
+    summarize(tabs_max = max(tabs_is)) %>%
+    expand_grid(crit_level = crit_list) %>% 
+    left_join(rollfamFDR, by = c('signal_family', 'oos_begin_year', 'crit_level')) %>% 
+    mutate(tabs_hurdle = if_else(is.na(tabs_hurdle), tabs_max+1, tabs_hurdle)) 
+    
+# find oos returns by tstat bin
+ngroup = 20
+rollbin = rollsignal1 %>% 
+    group_by(signal_family, oos_begin_year) %>%
+    mutate(group = ntile(tstat_is, ngroup)) %>% 
+    group_by(signal_family, oos_begin_year, group) %>% 
+    summarize(
+        ret_oos = mean(ret_oos)
+        , ret_is = mean(ret_is)
+        , tstat_is = mean(tstat_is)
+    ) 
+
+# function for plotting
+pdf_plot_BY1_3 = function(samp_min = 1983, samp_max = 2020){
+
+    # summarize for selected sample
+    sumfamFDR = rollfamFDR %>% 
+        filter(oos_begin_year >= samp_min & oos_begin_year <= samp_max) %>%
+        group_by(signal_family, crit_level) %>%
+        summarize(tabs_hurdle = mean(tabs_hurdle)) %>% 
+        arrange(signal_family, crit_level) %>% 
+        pivot_wider(names_from = crit_level, values_from = tabs_hurdle, names_prefix = 'crit_') 
+
+    sumbin = rollbin %>% 
+        filter(oos_begin_year >= samp_min & oos_begin_year <= samp_max) %>%
+        group_by(signal_family, group) %>%
+        summarize(
+            se_ret_oos = sd(ret_oos)/sqrt(n()), ret_oos = mean(ret_oos)
+            , ret_is = mean(ret_is), tstat_is = mean(tstat_is)
+        ) 
+
+    # plot
+    leglab = c('BY1.3: FDR<1%', 'BY1.3: FDR<5%')
+    p = sumbin %>% 
+        left_join(sumfamFDR, by = 'signal_family') %>%
+        mutate(signal_family = long_family_name(signal_family)) %>%
+        ggplot(aes(x = tstat_is, y = ret_oos, group = signal_family)) +
+        geom_hline(yintercept = 0, color = 'gray50') +
+        # plot main stuff
+        geom_point() +
+        geom_errorbar(aes(ymin = ret_oos - 1.96*se_ret_oos
+            , ymax = ret_oos + 1.96*se_ret_oos), width = 0.2) +
+        # plot hurdle lines
+        geom_vline(aes(xintercept = crit_0.01, color = '1%', linetype = '1%')) +
+        geom_vline(aes(xintercept = -1*crit_0.01), color = MATRED, linetype = 'solid') +
+        geom_vline(aes(xintercept = crit_0.05, color = '5%', linetype = '5%')) +
+        geom_vline(aes(xintercept = -1*crit_0.05), color = MATPURPLE, linetype = 'dashed') +
+        scale_color_manual(name = 'BY1.3 Hurdles'
+            , values = c('1%' = MATRED, '5%' = MATPURPLE)
+            , labels = leglab) +
+        scale_linetype_manual(name = 'BY1.3 Hurdles'
+            , values = c('1%' = 'solid', '5%' = 'dashed')
+            , labels = leglab) +        
+        facet_wrap(~ signal_family, scales = "free_x", nrow = 3) +
+        theme_bw() +
+        theme(legend.position = c(1.5,9.4)/10
+            , legend.title = element_blank()
+            , text = element_text(size = 18)
+            , legend.text = element_text(size = 9)
+            # , legend.margin = margin(t=0.1, unit = 'cm')
+            , legend.key = element_rect(fill = 'transparent')
+            , legend.box.background = element_rect(colour = 'black')) +
+        coord_cartesian(xlim = c(-1,1)*6)  +
+        ylab('Out-of-Sample Long-Short Return (% ann)') +
+        xlab('in-sample t-statistic')
+    ggsave(paste0(plot_path, paste0('BY1.3-', samp_min, '-', samp_max), '.pdf'), p
+        , scale = 1, width = 6, height = 8)
+
+} # end plotting function
+
+# run plotting function
+pdf_plot_BY1_3(samp_min = 1983, samp_max = 2004)
+pdf_plot_BY1_3(samp_min = 2004, samp_max = 2020)
+pdf_plot_BY1_3(samp_min = 1983, samp_max = 2020)
