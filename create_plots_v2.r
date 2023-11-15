@@ -468,9 +468,7 @@ p =  retbest %>%
     ylab('Value of $1 Invested in 1983')  +
     coord_cartesian(xlim = c(1980, 2020)) +
     scale_y_continuous(trans='log10', breaks = 0:10)
-ggsave(paste0(plot_path, 'beststrats-cret.pdf'), p, scale = 0.5)
-
-    
+ggsave(paste0(plot_path, 'beststrats-cret.pdf'), p, scale = 0.5)    
 # summarize to console ----------------------------
 retbest %>% 
     group_by(famfilter, pctmin, nstrat) %>%
@@ -521,8 +519,6 @@ pubcomb = pubret %>%
         group_by(year) %>% summarize(ret = mean(ret), nstrat = n()) %>% 
         mutate(name = 'pub_pre2004') 
     )
-
-
 
 # add to retbest
 retbest2 = retbest %>% 
