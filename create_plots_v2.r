@@ -375,24 +375,10 @@ pdf_plot_rollpred_is(ngroup = 20, oos_freq_adj = 1, yearmin = 1983, yearmax = 20
 pdf_plot_rollpred_is(ngroup = 20, oos_freq_adj = 1, yearmin = 2020, yearmax = 2020)
 
 # Find the best strats and plot -----------------------
-# here we apply signs
-top_pct_select = c(0.5, 1,5,10)
+# here we use sign information
+extreme_rank_def = c(0.5, 1,5,10)
 
-# flip signs
-rollrank = rollpred %>% 
-    select(signal_family, signalid, oos_begin_year, pred_ret, ret_oos) %>%
-    mutate(pred_sign = sign(pred_ret)) %>% 
-    mutate(
-        pred_ret = pred_ret * pred_sign
-        , ret_oos = ret_oos * pred_sign
-    ) 
-
-# define "best" strategies
-Nstratall = rollrank %>% distinct(signal_family, signalid) %>% nrow()
-rankdat = tibble(top_pct = top_pct_select) %>% 
-    mutate(top_rank = round(top_pct/100*Nstratall)) 
-
-# settings for best signals
+# explore by family
 famfilterlist = list(
     famlist, famlist[grepl('acct', famlist)]
     , famlist[grepl('acct_ew', famlist)], famlist[grepl('pastret', famlist)]
@@ -402,30 +388,38 @@ famnamelist = c('1 all', '2 acct only'
         , '3 acct ew only', '4 pastret only'
         , '5 ew only')
 
-# find cummulative returns for best signals
+# find cumulative returns for best  signals
 retbest = data.table()
 for (famfilteri in 1:length(famfilterlist)){
     famfilter = famfilterlist[[famfilteri]]
-    rollselect = rollrank %>% 
+    rollselect = rollpred %>% 
         filter(signal_family %in% famfilter) %>% 
         group_by(oos_begin_year) %>%
-        arrange(desc(pred_ret)) %>% mutate(rank = row_number()) %>% 
+        arrange(pred_ret) %>% mutate(rank_pct = row_number()/n()*100) %>% 
         ungroup() %>% 
         mutate(famfilter = famnamelist[famfilteri]) %>% 
         setDT()
+    
+    for (rankx in extreme_rank_def){
 
-    for (rankx in rankdat$top_rank){
-        
         temp = rollselect %>% 
-            filter(rank <= rankx) %>%
-            group_by(famfilter, oos_begin_year) %>%
-            summarize(ret_oos = mean(ret_oos)) %>% 
-            mutate(nstrat = as.factor(rankx)) %>% 
-            mutate(pctmin = as.factor(rankdat[ rankdat$top_rank == rankx, ]$top_pct))
+            mutate(port = case_when(
+                    rank_pct <= rankx ~ 'short'
+                    , rank_pct > 100-rankx ~ 'long'
+                    , TRUE ~ 'neutral')) %>% 
+            group_by(famfilter, oos_begin_year, port) %>% 
+            summarize(ret_oos = mean(ret_oos), nstrat = n()) %>% 
+            ungroup() %>% 
+            pivot_wider(names_from = port, values_from = c(ret_oos, nstrat)) %>% 
+            mutate(ret_oos = ret_oos_long - ret_oos_short
+                , nstrat = nstrat_long + nstrat_short) %>% 
+            select(famfilter, oos_begin_year, ret_oos, nstrat) %>% 
+            mutate(pctmin = rankx)
 
         retbest = rbind(retbest, temp)
     }
 }
+
 
 # plot cumulative return using various specs
 legtitle = 'best pct strats, pct='
@@ -446,14 +440,17 @@ ggsave(paste0(plot_path, 'sketch-cret.pdf'), p, scale = 0.5)
 
 # plot in levels
 colorlist = c(MATBLUE, MATRED, MATYELLOW, MATPURPLE, MATGREEN)
-legtitle = 'Using Strats in Top'
+legtitle = 'Using Strats in Extreme'
+pctselect = c(1, 5, 10)
+pctselectstr = paste0(pctselect, '%')
+
 p =  retbest %>% 
     filter(famfilter == '1 all') %>%
-    filter(pctmin %in% c(0.5,1,5)) %>%     
+    filter(pctmin %in% pctselect) %>%     
     group_by(pctmin) %>%
     arrange(pctmin, oos_begin_year) %>%
     mutate(pctmin = paste0(pctmin, '%')) %>%     
-    mutate(pctmin = factor(pctmin, levels = c('0.5%', '1%', '5%'))) %>%
+    mutate(pctmin = factor(pctmin, levels = pctselectstr)) %>%
     mutate(cret = cumprod(1+ret_oos/100)) %>%
     ggplot(aes(x = oos_begin_year, y = cret, group = pctmin)) +
     geom_hline(yintercept = 0, color = 'grey') +
@@ -467,24 +464,17 @@ p =  retbest %>%
     xlab(NULL) +
     ylab('Value of $1 Invested in 1983')  +
     coord_cartesian(xlim = c(1980, 2020)) +
-    scale_y_continuous(trans='log10', breaks = 0:10)
-ggsave(paste0(plot_path, 'beststrats-cret.pdf'), p, scale = 0.5)    
+    scale_y_continuous(trans='log10', breaks = c(1,seq(5,100,5))
+        , sec.axis = sec_axis(~., breaks = c(1,seq(5,100,5)))) 
+ggsave(paste0(plot_path, 'beststrats-cret.pdf'), p, scale = 1, width = 9, height = 6)  
+
 # summarize to console ----------------------------
 retbest %>% 
-    group_by(famfilter, pctmin, nstrat) %>%
-    summarize(rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()) %>% 
+    group_by(famfilter, pctmin) %>%
+    summarize(rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n(), nstrat = mean(nstrat)) %>% 
     mutate(sharpe = rbar/vol) %>% 
     mutate(tstat = rbar/vol*sqrt(nyear))
 
-retbest %>% 
-    mutate(subsamp = if_else(oos_begin_year <= 2004, 'pre-2004','post-2004') )%>%
-    group_by(famfilter, nstrat, pctmin, subsamp) %>%
-    summarize(rbar = mean(ret_oos), vol = sd(ret_oos), nyear= n()) %>% 
-    mutate(sharpe = rbar/vol) %>% 
-    mutate(tstat = rbar/vol*sqrt(nyear)) %>% 
-    arrange(nstrat, subsamp, famfilter) %>% 
-    print(n=Inf) 
-    
 # Latex Table of best returns  ----------------------------
 
 library(xtable)
@@ -529,7 +519,7 @@ retbest2 = retbest %>%
     mutate(pctmin = pctmin %>% as.character()
         , nstrat = nstrat %>% as.character() %>% as.numeric()) %>% 
     mutate(pctmin = factor(pctmin, levels = c('0.5','1','5','10','pubcomb','pub_pre2004')
-        , labels = c('DM Top 0.5\\%', 'DM Top 1\\%', 'DM Top 5\\%', 'DM Top 10\\%'
+        , labels = c('DM Extreme 0.5\\%', 'DM Extreme 1\\%', 'DM Extreme 5\\%', 'DM Extreme 10\\%'
             , 'Pub Anytime', 'Pub Pre-2004'))) 
 
 tabdat = retbest2 %>% 
@@ -564,7 +554,7 @@ tabdat2 = tabdat %>% rbind(
         levels = c('blank',levels(tabdat$pctmin)))) %>% 
     arrange(sampid, pctmin)  %>% 
     # clean up
-    filter(!grepl('DM Top 0.5', pctmin))
+    filter(!grepl('DM Extreme 0.5', pctmin))
 
 # output tex
 xtable(tabdat2 %>% 
