@@ -21,7 +21,7 @@ from pathlib import Path
 plt.rcParams.update({'font.size': 12})
 
 
-MachineUsed = 1
+MachineUsed = 2
 
 if MachineUsed==1: # Chuks 
     path_input = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/')
@@ -82,6 +82,46 @@ rollsignal1.reset_index(inplace=True)
 
 # clean family names
 rollsignal1['signal_family'] = rollsignal1['signal_family'].replace(SIGNAL_FAMILY_NAME_MAP)
+
+#%% Fit earliest histogram of t-statistics -------------------------------------------------
+
+
+# firstsignal has only the earliest year for each signal family
+earliest_year = rollsignal1.groupby('signal_family')['oos_begin_year'].min()\
+    .rename('earliest_year').reset_index()
+firstsignal = rollsignal1.merge(earliest_year, on=['signal_family'])\
+    .query('oos_begin_year == earliest_year')
+firstsignal['sign_is'] = np.sign(firstsignal['ret_is'])
+    
+# fit these t-stats by family
+def fit_tstat(tstatlist):
+    return max( (tstatlist**2).mean(), 1)
+
+firstsignal\
+    .groupby(['signal_family'])\
+    .agg({'tstat_is': fit_tstat})
+
+firstsignal\
+    .groupby(['signal_family','sign_is'])\
+    .agg({'tstat_is': fit_tstat})
+
+
+#%% 
+# histograms
+with PdfPages(path_figs / 'tstat_hist.pdf') as pdf: 
+    for family_cur in firstsignal['signal_family'].unique():
+        fig, ax = plt.subplots(figsize=(10, 7))
+        temp = firstsignal.query("signal_family == @family_cur")
+        ax.hist(temp['tstat_is'], bins=50, alpha=0.7, label='IS')
+        ax.legend(loc='upper left')
+        ax.set_title(f'{family_cur} {temp["earliest_year"].values[0]} \n')
+        ax.set_xlabel('t-statistic')
+        ax.set_ylabel('Frequency')
+        pdf.savefig(bbox_inches="tight") 
+        plt.show(); plt.close()
+
+
+
 
 #%% Estimate shrinkage --------------------------------------------------------
 
