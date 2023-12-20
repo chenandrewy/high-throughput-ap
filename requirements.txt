@@ -9,3 +9,4 @@ scipy==1.11.2
 statsmodels==0.14.0
 tqdm==4.66.1
 wrds==3.1.6
+scikit-learn==1.3.2
