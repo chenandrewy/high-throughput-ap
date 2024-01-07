@@ -1,554 +1,599 @@
-# 2023 10 Andrew: testing ways of visualizing rolling OOS and shrinkage estimates
-# to do: 
-#   nicer split sample at 2004 (use a function)
-#   flip decay sign for intuitiveness?
-#   cross sectional standard errors using montonicity
-#   fdr bound estimates
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Dec 21 16:27:44 2023
 
-#%% environment ---------------------------------------------------------------
+@author: cdim
+"""
 
-import os
+# %% environment ---------------------------------------------------------------
+
+import os, re
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+import seaborn as sns
 import statsmodels.formula.api as smf
 from scipy.stats import norm
 from pathlib import Path
+from sklearn.mixture import GaussianMixture
+import warnings
+
+
+warnings.simplefilter(action='ignore', category=FutureWarning)
+tqdm.pandas()
+plt.style.use('seaborn-v0_8-whitegrid')
+plt.rcParams.update({"font.size": 12})
+COLORS = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
 
 
-plt.rcParams.update({'font.size': 12})
+MachineUsed = 1
 
-
-MachineUsed = 2
-
-if MachineUsed==1: # Chuks 
-    path_input = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/')
-    path_output = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/')
-    path_figs = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Figures/')
-    path_tables = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Tables/')
-elif MachineUsed==2: # Andrew 
-
+if MachineUsed == 1:  # Chuks
+    path_input = Path("C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/")
+    path_output = Path("C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/")
+    path_figs = Path("C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Figures/")
+    path_tables = Path("C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Tables/")
+elif MachineUsed == 2:  # Andrew
     CPUUsed = 8
 
     # get working directory
-    path_root = Path(os.getcwd() + '/../../')
+    path_root = Path(os.getcwd() + "/../../")
 
-    path_input = Path(path_root / 'Data/')
-    path_output = Path(path_root / 'Data/')
-    path_figs = Path(path_root / 'Andrew/Figures/')
-    path_tables = Path(path_root / 'Andrew/Tables/')    
+    path_input = Path(path_root / "Data/")
+    path_output = Path(path_root / "Data/")
+    path_figs = Path(path_root / "Andrew/Figures/")
+    path_tables = Path(path_root / "Andrew/Tables/")
 
 
 # Select rolling t-stat / oos file
-rollsignal_file = 'OOS_signal_tstat_OosNyears1.csv.gzip'
-rvpk_rollsignal_file = 'RvPk_OOS_signal_tstat_IsNyears5_OosNyears1.csv.gzip'
+rollsignal_file = "OOS_signal_tstat_OosNyears1.csv.gzip"
+rvpk_rollsignal_file = "RvPk_OOS_signal_tstat_IsNyears5_OosNyears1.csv.gzip"
 
-USE_SIGN_INFO = True
+
+
+# USE_SIGN_INFO = True
+
 SIGNAL_FAMILY_NAME_MAP = {
-    'DataMinedLongShortReturnsEW': 'acct_ew',
-    'DataMinedLongShortReturnsVW': 'acct_vw',
-    'ticker_Harvey2017JF_ew': 'ticker_ew',
-    'ticker_Harvey2017JF_vw': 'ticker_vw',
-    'PastReturnSignalsLongShort_ew': 'past_ret_ew',
-    'PastReturnSignalsLongShort_vw': 'past_ret_vw',
-    'RavenPackSignalsLongShort_ew': 'ravenpack_ew',
-    'RavenPackSignalsLongShort_vw': 'ravenpack_vw'
-
+    "DataMinedLongShortReturnsEW": "acct_ew",
+    "DataMinedLongShortReturnsVW": "acct_vw",
+    "ticker_Harvey2017JF_ew": "ticker_ew",
+    "ticker_Harvey2017JF_vw": "ticker_vw",
+    "PastReturnSignalsLongShort_ew": "past_ret_ew",
+    "PastReturnSignalsLongShort_vw": "past_ret_vw",
+    "RavenPackSignalsLongShort_ew": "ravenpack_ew",
+    "RavenPackSignalsLongShort_vw": "ravenpack_vw",
+}
+FAMILY_LONG_NAME = {
+    'acct_ew': 'Accounting EW',
+    'acct_vw': 'Accounting VW',
+    'past_ret_ew': 'Past Return EW',
+    'past_ret_vw':'Past Return VW',
+    'ticker_ew':'Ticker EW',
+    'ticker_vw': 'Ticker VW',
+    'ravenpack_ew':'News Sentiment EW',
+    'ravenpack_vw': 'News Sentiment VW'
     }
+
+
+ret_freq_adj = 12 # annualize
+
+families_use = ['acct_ew', 'acct_vw', 'past_ret_ew', 'past_ret_vw', 
+                'ticker_ew', 'ticker_vw', 
+                # 'ravenpack_ew', 'ravenpack_vw'
+                ]
+
+# %% Define functions ----------------------------------------------------------
+
+
+# function for fitting t-stats
+def fit_fam(tstatvec, famselect):
+    # select model based on simple rules
+    if np.var(tstatvec) < 1:
+        # set GuassianMixture model to standard normal
+        mixnorm = GaussianMixture(
+            n_components=1, random_state=0, covariance_type="diag", max_iter=500
+        )
+        mixnorm.means_ = np.array([[0.0]])
+        mixnorm.covariances_ = np.array([[1.0]])
+        mixnorm.weights_ = np.array([1.0])
+
+    elif "past_ret" not in famselect:
+        # estimate simple normal
+        mixnorm = GaussianMixture(
+            n_components=1, random_state=0, covariance_type="diag", max_iter=500
+        )
+        mixnorm.fit(tstatvec)
+    else:
+        # estimate 2 component mixture normal
+        mixnorm = GaussianMixture(
+            n_components=2, random_state=0, covariance_type="diag", max_iter=500
+        )
+        mixnorm.fit(tstatvec)
+
+    return mixnorm
+
+# function for shrinkage predictions
+def predict_fam(mixnorm, tstatvec, retvec):
+    shrink = 1 / mixnorm.covariances_
+    shrink[shrink > 1] = 1  # shirnkage cannot be > 1
+
+    # initialize pred
+    pred_case = np.zeros((tstatvec.shape[0], 2))
+    prob_case = pred_case.copy()
+    for case_i in range(0, mixnorm.n_components):
+        # predict each case as simple normal updating
+        pred_case[:, case_i] = shrink[case_i] * mixnorm.means_[case_i] + (
+            1 - shrink[case_i]
+        ) * tstatvec.reshape(-1)
+
+        # un-normalized prob of each case
+        prob_case[:, case_i] = mixnorm.weights_[case_i] * norm.pdf(
+            tstatvec,
+            loc=mixnorm.means_[case_i],
+            scale=np.sqrt(mixnorm.covariances_[case_i]),
+        ).reshape(-1)
+    
+    # normalize probs
+    denom = np.sum(prob_case, axis=1)
+    prob_case = prob_case / denom.reshape(-1, 1)
+    
+    
+    # predict t-stat and return
+    pred_tstat = np.sum(prob_case * pred_case, axis=1).reshape(-1, 1)
+    pred_ret = pred_tstat * retvec / tstatvec
     
 
+    # combine and output
+    pred = {"pred_tstat": pred_tstat.flatten(), "pred_ret": pred_ret.flatten()}
+    return pred
 
-#%% Load data ----------------------------------------------------------------
 
-# load up signal level data 
+# %% Load data ----------------------------------------------------------------
+
+# load up signal level data
 rollsignal0 = pd.read_csv(path_input / rollsignal_file)
 
 # load ravenpack signal data: currently based on differently IS window
 df_rvpk = pd.read_csv(path_output / rvpk_rollsignal_file)
 
-rollsignal0 = pd.concat([rollsignal0, df_rvpk])
+# rollsignal0 = pd.concat([rollsignal0, df_rvpk])
 
+rollsignal0['ret'] = rollsignal0['mean_ret'] * ret_freq_adj
+rollsignal0["s_flag"] = rollsignal0["s_flag"].str.lower()
 
-rollsignal0.rename(columns={'mean_ret': 'ret'}, inplace=True)
-rollsignal0['s_flag'] = rollsignal0['s_flag'].str.lower()
-
-# reshape 
-rollsignal1 = rollsignal0.pivot(index=['signal_family', 'oos_begin_year', 'signalid'],
-                columns='s_flag', values=['ret','tstat'])
-rollsignal1.columns = ['_'.join(col) for col in rollsignal1.columns]
+# reshape
+rollsignal1 = rollsignal0.pivot(
+    index=["signal_family", "oos_begin_year", "signalid"],
+    columns="s_flag",
+    values=["ret", "tstat"],
+)
+rollsignal1.columns = ["_".join(col) for col in rollsignal1.columns]
 rollsignal1.reset_index(inplace=True)
 
 # clean family names
-rollsignal1['signal_family'] = rollsignal1['signal_family'].replace(SIGNAL_FAMILY_NAME_MAP)
+rollsignal1["signal_family"] = rollsignal1["signal_family"].replace(
+    SIGNAL_FAMILY_NAME_MAP
+)
 
-#%% Fit earliest histogram of t-statistics -------------------------------------------------
 
 
-# firstsignal has only the earliest year for each signal family
-earliest_year = rollsignal1.groupby('signal_family')['oos_begin_year'].min()\
-    .rename('earliest_year').reset_index()
-firstsignal = rollsignal1.merge(earliest_year, on=['signal_family'])\
-    .query('oos_begin_year == earliest_year')
-firstsignal['sign_is'] = np.sign(firstsignal['ret_is'])
+# %% plot distribution of in-sample t-stats and model-implied distribution
+
+
+Nsim = 100_000
+seed = 114
+
+# get null t-stat for plotting
+np.random.seed(seed)
+tstatvec_snorm = pd.Series(np.random.randn(Nsim), name='Null')
+
+
+for oos_begin_yr, ymax in [(1983, 0.6), (2004, 0.85), (2020, 0.85)]:
+    temp = rollsignal1.query('oos_begin_year==@oos_begin_yr')
     
-# fit these t-stats by family
-def fit_tstat(tstatlist):
-    return max( (tstatlist**2).mean(), 1)
+    # initialize figure
+    fig = plt.figure(figsize=(7,8))
+    for i, family in enumerate(families_use):
+        df = temp.query('signal_family == @family')
+        retvec, tstatvec = df[["ret_is"]].values,  df[["tstat_is"]].values
 
-firstsignal\
-    .groupby(['signal_family'])\
-    .agg({'tstat_is': fit_tstat})
-
-firstsignal\
-    .groupby(['signal_family','sign_is'])\
-    .agg({'tstat_is': fit_tstat})
-
-
-#%% 
-# histograms
-with PdfPages(path_figs / 'tstat_hist.pdf') as pdf: 
-    for family_cur in firstsignal['signal_family'].unique():
-        fig, ax = plt.subplots(figsize=(10, 7))
-        temp = firstsignal.query("signal_family == @family_cur")
-        ax.hist(temp['tstat_is'], bins=50, alpha=0.7, label='IS')
-        ax.legend(loc='upper left')
-        ax.set_title(f'{family_cur} {temp["earliest_year"].values[0]} \n')
-        ax.set_xlabel('t-statistic')
-        ax.set_ylabel('Frequency')
-        pdf.savefig(bbox_inches="tight") 
-        plt.show(); plt.close()
-
-
-
-
-#%% Estimate shrinkage --------------------------------------------------------
-
-
-# estimate shrinkage each year
-def get_shrinkage(tstatlist):
-    return 1/max(tstatlist.var(), 1)
-
-rollfamily = rollsignal1\
-    .groupby(['signal_family', 'oos_begin_year'])\
-    .agg({'tstat_is': get_shrinkage})\
-    .rename(columns={'tstat_is': 'shrinkage'}).reset_index()
-
-# merge onto rollsignal and find predicted return
-rollsignal2 = rollsignal1.merge(rollfamily, on=['signal_family', 'oos_begin_year'])
-rollsignal2['ret_pred'] = rollsignal2.eval('ret_is * (1 - shrinkage)')
+        # fit tstats
+        mixnorm = fit_fam(tstatvec, family)
+        
+        # simulate t-stats
+        np.random.seed(seed+1)
+        tstatvec_sim = mixnorm.sample(Nsim)
+        
+        # plot for this year group
+        ax = fig.add_subplot(3,2,i+1)
+        ax.hist(tstatvec, bins=50, density=True, color=COLORS[0], alpha=0.6, 
+                label='Data')
+        ax.hist(tstatvec_sim[0], bins=50, density=True, color=COLORS[1], 
+                alpha=0.6, label='Model')
+        tstatvec_snorm.plot(ax=ax, kind='density', color='k', alpha=0.6,)
+        ax.set_xlim(-6, 6)
+        ax.set_ylim(0, ymax)
+        plt.title(f'{FAMILY_LONG_NAME[family]}', fontsize=12)
+        
+        if i == 0:
+            plt.legend(loc='upper left')
+        if i in [4, 5]:
+            ax.set_xlabel('$t$-statistic', fontsize=12)
+        if i%2 != 0:
+            ax.set_ylabel('')
+        else:
+            ax.set_ylabel('Density', fontsize=12)
+        
+    plt.subplots_adjust(hspace=0.3)
+    fig.savefig(path_figs / f'tstat-hist-{oos_begin_yr}.pdf', format='pdf', 
+                bbox_inches="tight")
+    plt.show()
 
 
-# apply in-sample sign information if requested
-# clarify why we do this step
-if USE_SIGN_INFO:
-    rollsignal2['sign_is'] = np.sign(rollsignal2['ret_is'])
-    cols = ['ret_is', 'ret_oos', 'tstat_is', 'tstat_oos', 'ret_pred']
-    rollsignal2[cols] = rollsignal2[cols].values * rollsignal2[['sign_is']].values
+#%% Get predicted returns with the model for family-year
 
-#%% Sort each year, take mean returns, then measure decay (plot) -------------
 
-# standard errors are currently overstated.  They don't account for
-# the monotonicity of returns w.r.t. in-sample groups
-# we should use some kind of regression line w/ confidence intervals
+df_ret_predict = []
+for g, df in tqdm(rollsignal1.groupby(['signal_family', 'oos_begin_year'])):
+    family, oos_yr = g
+    retvec, tstatvec = df[["ret_is"]].values,  df[["tstat_is"]].values
+    mixnorm = fit_fam(tstatvec, family)
+    pred = predict_fam(mixnorm, tstatvec, retvec)
+    pred = pd.DataFrame(pred)
+    cols = ['signalid', 'signal_family', 'oos_begin_year', "ret_is", "ret_oos"]
+    pred[cols] = df[cols].values
+    df_ret_predict.append(pred)
 
-# user input
-n_groups = 20
-mean_begin = 1983 # really min year
-mean_end = 2021 # max year
-n_se_plot = 2 # for errorbars
-y_lim_all = [-1,1]
-
-# sort into is_group bins
-rollsignaltemp = rollsignal2.copy()
-rollsignaltemp['is_group'] = rollsignaltemp.groupby(['signal_family', 'oos_begin_year'])\
-    ['ret_is'].transform(lambda x: pd.qcut(x, n_groups, labels=np.arange(1,n_groups+1)\
-                                 , duplicates='drop'))
-
-# aggregate to bin, year
-roll_is_group = rollsignaltemp.groupby(['signal_family', 'oos_begin_year', 'is_group'])\
-    .agg({'ret_is': 'mean', 'ret_pred': 'mean', 'ret_oos': 'mean'}).reset_index()
-
-# agg to bin
-sum_is_group = roll_is_group.query('@mean_begin <= oos_begin_year <= @mean_end')\
-    .groupby(['signal_family', 'is_group'])\
-    .agg({'ret_is': 'mean', 'ret_pred': 'mean', 'ret_oos': 'mean'})#.reset_index()
-
-# find standard error for ret_oos 
-#   we should move to non-overlapping observations
-temp = roll_is_group.query('@mean_begin <= oos_begin_year <= @mean_end')\
-    .groupby(['signal_family', 'is_group'])\
-    .agg({'ret_oos': ['std', 'count']})#.reset_index()
     
-temp = temp.loc[sum_is_group.index]
-sum_is_group['ret_oos_se'] = n_se_plot*temp['ret_oos']['std'] / np.sqrt(temp['ret_oos']['count'])
-sum_is_group = sum_is_group.reset_index()
-
-# find decay by family [is there a cleaner way to do this?]
-sum_is_group['decay_oos'] = 1 - sum_is_group['ret_oos']/sum_is_group['ret_is']
-sum_is_group['decay_pred'] = 1 - sum_is_group['ret_pred']/sum_is_group['ret_is']
-family_decay = sum_is_group[sum_is_group['ret_is'].abs() > 0.10]\
-    .groupby(['signal_family'])\
-    .agg({'decay_oos': 'mean', 'decay_pred': 'mean'})
+df_ret_predict = pd.concat(df_ret_predict)
+cols = ['signalid', 'signal_family', 'oos_begin_year', "ret_is", "ret_oos",
+        'pred_ret', 'pred_tstat']
+df_ret_predict = df_ret_predict.reindex(cols, axis=1)
+cols = ["ret_is", "ret_oos", 'pred_ret', 'pred_tstat']
+df_ret_predict[cols] = df_ret_predict[cols].astype(float)
 
 
-# plot
-family_list = sum_is_group['signal_family'].unique()
-df = roll_is_group.dropna(subset=['ret_is']).query('@mean_begin <= oos_begin_year <= @mean_end')\
-    .groupby('signal_family')[['oos_begin_year']].agg(
-        min_yr = ('oos_begin_year', np.min),
-        max_yr = ('oos_begin_year', np.max)
+
+#%% Plot IS, OOS and Prediced returns
+
+ngroup = 20
+oos_freq_adj = 1
+year_set = [(1983, 2004), 
+            (2004, 2020), 
+            #(1983, 2020), (2020, 2020)
+            ]
+
+for year_min, year_max in year_set:
+    temp = df_ret_predict.query('@year_min<=oos_begin_year<=@year_max').copy()
+    # yr_min, yr_max =  temp['oos_begin_year'].min(), temp['oos_begin_year'].max()
+    
+    temp['bin'] = temp.groupby(['signal_family', 'oos_begin_year'])['ret_is'].transform(
+        lambda x: pd.qcut(x, ngroup, labels=np.arange(1, ngroup+1)))
+    
+    # summarize by family-oos_year-bin
+    temp = temp.groupby(['signal_family', 'oos_begin_year', 'bin'], observed=True).agg(
+        {'ret_is': 'mean',
+        'ret_oos': 'mean',
+        'pred_ret': 'mean'}
         )
-with PdfPages(path_figs / 'shrinkage_vs_oos_cross.pdf') as pdf: 
-
-    for family_cur in family_list:
-        temp = sum_is_group.query("signal_family == @family_cur").set_index('is_group')
-        min_yr, max_yr = df.loc[family_cur].values
-        
-        fig, ax = plt.subplots(figsize=(10, 7))
-        
-        ax.axhline(y=0, color='black', alpha=0.7, linestyle='-', linewidth=1) 
-        ax.plot(temp.index, temp['ret_is'], color='grey', alpha=0.7, label='IS')
-        ax.errorbar(temp.index, temp['ret_oos'], yerr=temp['ret_oos_se'], fmt='o', 
-                    color='blue', alpha=0.7, label='OOS')
-        ax.plot(temp.index, temp['ret_pred'], color='red', alpha=0.7, label='Pred.')
-        ax.legend(loc='upper left')
-
-        # add decay by family text
-        decay_oos = family_decay.loc[family_cur, 'decay_oos']
-        decay_pred = family_decay.loc[family_cur, 'decay_pred']            
-        ax.text(0.5, 0.8, f'Decay OOS = {decay_oos:.2f} \nDecay pred. = {decay_pred:.2f}', 
-                transform=ax.transAxes  , color='blue')
-
-        # fix y limits and add labels
-        ax.set_ylim(y_lim_all)
-        ax.set_xticks(temp.index)
-        
-        # label
-        ax.set_title(f'{family_cur} {min_yr} - {max_yr}\n')
-        ax.set_xlabel('In-sample return group')
-        ax.set_ylabel('Mean return (%)')  
-        
-        pdf.savefig(bbox_inches="tight") 
-        plt.show(); plt.close()
-
-
-
-
-#%% Measure decay by ols each year, take means, then plot
-# follows Chen Velikov Figure 6
-
-# estimate oos decay each year
-def get_oos_decay(data):
-    slope = smf.ols(formula = 'ret_oos ~ 0 + ret_is', data=data).fit().params[0]
-    decay = 1-slope
-    return decay
-
-tempsignal = rollsignal2.copy()
-
-# winsorize ret_oos (doesn't make a difference)
-winsor_p = 0.01
-tempsignal['ret_oos'] = tempsignal.groupby(['signal_family', 'oos_begin_year'])['ret_oos']\
-    .transform(lambda x: x.clip(lower=x.quantile(winsor_p), upper=x.quantile(1-winsor_p)))
-tempsignal['ret_is'] = tempsignal.groupby(['signal_family', 'oos_begin_year'])['ret_is']\
-    .transform(lambda x: x.clip(lower=x.quantile(winsor_p), upper=x.quantile(1-winsor_p)))
-
-
-temp = tempsignal.groupby(['signal_family', 'oos_begin_year'])\
-    .apply(get_oos_decay)\
-    .reset_index(name='oos_decay')
-
-# merge onto rollfamily
-rollfamily2 = rollfamily.merge(temp, on=['signal_family', 'oos_begin_year'])
-
-# plot
-family_list = rollfamily2['signal_family'].unique()
-n_ave = 5
-with PdfPages(path_figs / 'shrinkage_vs_decay_ts.pdf') as pdf: 
-    for family_cur in family_list:
-                
-        temp = rollfamily2.query("signal_family == @family_cur")\
-            .set_index('oos_begin_year').sort_index().drop(columns=['signal_family'])
-         
-        # take moving average
-        temp_ma = temp.rolling(n_ave).mean()
-            
-        for df, sfx in [(temp, ''), (temp_ma, 'ma')]:
-            if sfx == '':
-                tt_sfx = sfx
-            else:
-                tt_sfx = f'{n_ave} year {sfx}'
-            
-            fig, ax = plt.subplots(figsize=(10, 7))
     
-            ax.plot(df.index, df['shrinkage'], color='red', alpha=0.7, 
-                    linewidth=4.0, label='Shrinkage')
-            ax.plot(df.index, df['oos_decay'], color='blue', alpha=0.7, 
-                    linewidth=4.0, label='OOS decay')
-            ax.scatter(df.index, df['oos_decay'], color='blue', alpha=0.7)
-            
-            # label
-            
-            ax.set_title(f'{family_cur} {tt_sfx}\n')
-            ax.set_xlabel('OOS begin year')
-            ax.set_ylabel('Shrinkage and OOS decay')
-            ax.legend(loc='upper left')
-            
-            # fix y limits
-            ax.set_ylim([-1,2])
-            
-            # guide lines at 0 and 1
-            ax.axhline(y=0, color='black', alpha=0.7, linestyle='--')
-            ax.axhline(y=1, color='black', alpha=0.7, linestyle='--')    
-            
-            pdf.savefig(bbox_inches="tight") 
-            plt.show(); plt.close()
-
-
-#%% Alternative to Measure decay by ols for group then plot
-
-
-# year_split = 2001 # for two sub-sample split
-
-# follows Chen Velikov Figure 6
-
-def get_oos_decay_v2(data):
-    
-    mod = smf.ols(formula = 'ret_oos_is ~ 0 + neg_ret_is', data=data).fit(
-        cov_type='cluster', cov_kwds={'groups': data[['signalid', 'oos_begin_year']]})
-    
-    # note, the slope from the above regression is the same as doing
-    # slope = smf.ols(formula = 'ret_oos ~ 0 + ret_is', data=data).fit().params[0]
-    # decay = 1 - slope
-    # but the above allows us to compute std error and confidence interval directly
-    
-    decay =[mod.params[0], *mod.conf_int()[0]]
-    return decay
-
-
-def get_ave_shrinkage(data):
-    mod = smf.ols(formula = 'shrinkage ~ 1', data=data).fit(
-        cov_type='HAC', cov_kwds={'maxlags': 2})
-    return [mod.params[0], *mod.conf_int()[0]]
-
-
-
-tempsignal = rollsignal2.copy()
-
-# winsorize ret_oos (doesn't make a difference)
-winsor_p = 0.01
-tempsignal['ret_oos'] = tempsignal.groupby(['signal_family', 'oos_begin_year'])['ret_oos']\
-    .transform(lambda x: x.clip(lower=x.quantile(winsor_p), upper=x.quantile(1-winsor_p)))
-tempsignal['ret_is'] = tempsignal.groupby(['signal_family', 'oos_begin_year'])['ret_is']\
-    .transform(lambda x: x.clip(lower=x.quantile(winsor_p), upper=x.quantile(1-winsor_p)))
-
-
-# tempsignal['sample'] = np.where(tempsignal['oos_begin_year']<year_split, 
-#                                 f'Pre-{year_split}', f'Post-{year_split}')
-
-# compute decay and it's standard error as 
-# 1 - slope from the regression ret_oos on ret_is
-tempsignal['ret_oos_is'] = tempsignal.eval('ret_oos - ret_is')
-tempsignal['neg_ret_is'] = tempsignal.eval('-1 * ret_is')
-temp = tempsignal.groupby(['signal_family']).apply(get_oos_decay_v2)
-temp = pd.DataFrame(temp.values.tolist(), columns=['oos_decay', 'decay_lci'], 
-                    index=temp.index).reset_index()
-
-# merge onto rollfamily
-rollfamily2 = rollfamily.sort_values(['signal_family', 'oos_begin_year'])
-# rollfamily2['sample'] = np.where(rollfamily2['oos_begin_year']<year_split, 
-#                                 f'Pre-{year_split}', f'Post-{year_split}')
-rollfamily2 = rollfamily2.groupby(['signal_family']).apply(get_ave_shrinkage)
-rollfamily2 = pd.DataFrame(rollfamily2.values.tolist(), columns=['shrinkage', 'shrinkage_lci'], 
-                    index=rollfamily2.index).reset_index()
-
-# get confidence interval gap for ploting
-rollfamily2 = rollfamily2.merge(temp, on=['signal_family']).set_index('signal_family')
-rollfamily2['shrinkage_ci'] = rollfamily2.eval('shrinkage - shrinkage_lci')
-rollfamily2['decay_ci'] = rollfamily2.eval('oos_decay - decay_lci')
-rollfamily2 = rollfamily2.rename(columns={'shrinkage': 'Shrinkage', 'oos_decay': 'OOS Decay'})
-
-
-family_long_name = {'acct': 'Fundamental',
-                    'past_ret': 'Past return',
-                    'ticker': 'Ticker',
-                    'ravenpack': 'News media'
-                    }
-
-
-with PdfPages(path_figs / 'shrinkage_vs_decay_pooled.pdf') as pdf: 
-    for sfx in ['ew', 'vw']:
-            
-        family_list = [v for v in rollfamily2.index if v.endswith(sfx)]
-    
-        df = rollfamily2.loc[family_list]
-        df.index = df.index.str.rstrip(f'_{sfx}')
-        df = df.rename(family_long_name)
-        
-        cols = ['Shrinkage', 'OOS Decay']
-        vals = df[cols]
-        ci_cols = ['shrinkage_ci', 'decay_ci']
-        ci_vals = df[ci_cols].rename(
-            columns={tup[0]: tup[1] for tup in zip(ci_cols, cols)})
-        
-        ax = vals.plot.bar(figsize=(10, 7), color=['b', 'r'], alpha=0.7, yerr=ci_vals,
-                           capsize=3)
-        plt.xticks(rotation=360)
-        plt.xlabel('')
-        plt.legend(loc='upper left')
-        plt.title(f'portfolio type: {sfx} \n')
-    
-        pdf.savefig(bbox_inches="tight") 
-        plt.show(); plt.close()
-
-
-
-#%% FDR bound vs oos cross plots =======================================================
-# there may be issues with time-series aggregation of probabilities here
-
-
-# user input
-n_groups = 20
-mean_begin = 1983 # really min year
-mean_end = 2021 # max year
-n_se_plot = 2 # for errorbars
-y_lim_all = [-1,1]
-t_oos_h = 0 # threshold for oos t-stat test
-leglab_oos = 'Pr(next year ret < 0)' # oos label (make sure to match t_oos_h + oos length)
-
-rollsignaltemp = rollsignal1.copy()
-
-# apply in-sample sign information if requested
-if USE_SIGN_INFO:
-    rollsignaltemp['sign_is'] = np.sign(rollsignaltemp['ret_is'])
-    for col in ['ret_is', 'ret_oos', 'tstat_is', 'tstat_oos']:
-        rollsignaltemp[col] = rollsignaltemp[col]*rollsignaltemp['sign_is']
-
-# find order stats for each family, year
-percentiles = np.linspace(0,1,n_groups+1)
-percentiles = percentiles[1:-1]
-
-rollfamsum = rollsignaltemp.groupby(['signal_family', 'oos_begin_year'])\
-    .apply(lambda x: x['tstat_is'].quantile(percentiles))\
-    .reset_index()
-
-# call these order stats t_max
-tempname = ['t_max_' + str(i) for i in range(1,n_groups)]
-rollfamsum.columns = ['signal_family', 'oos_begin_year'] + tempname
-rollfamsum['t_max_' + str(n_groups)] = 100
-
-# reshape to long
-rollfamsum = rollfamsum.melt(id_vars=['signal_family', 'oos_begin_year'], \
-                             value_vars=tempname + ['t_max_' + str(n_groups)])\
-    .rename(columns={'variable': 'is_group', 'value': 'tstat_max'})
-rollfamsum.sort_values(['signal_family', 'oos_begin_year', 'tstat_max']\
-                          , ascending=[True, True, True], inplace=True)
-
-rollfamsum['is_group'] = rollfamsum['is_group'].str.lstrip('t_max_').astype(int)
-
-# find tstat min
-rollfamsum['tstat_min'] = rollfamsum.groupby(['signal_family', 'oos_begin_year'])\
-    ['tstat_max'].shift(1)
-if USE_SIGN_INFO:
-    rollfamsum['tstat_min'].fillna(0, inplace=True)
-else:   
-    rollfamsum['tstat_min'].fillna(-100, inplace=True)
-
-# reorder tstat_max and tstat_min columns
-rollfamsum = rollfamsum[['signal_family', 'oos_begin_year', 'is_group', \
-                         'tstat_min', 'tstat_max']]
-    
-# apply normal cdf to get prob under null
-if USE_SIGN_INFO:
-    def cdf_null(x):
-        return 2*norm.cdf(x)
-else:
-    def cdf_null(x):
-        return norm.cdf(x)
-
-rollfamsum['Pr_null'] = rollfamsum['tstat_max'].apply(cdf_null)\
-        - rollfamsum['tstat_min'].apply(cdf_null)
-
-# FDR upper bound (assumes the quantiles are found correctly)
-rollfamsum['FDR_UB'] = rollfamsum['Pr_null'] / (1/n_groups)
-rollfamsum['FDR_UB'] = rollfamsum['FDR_UB'].apply(lambda x: min(x, 1))
-
-# compare with OOS stats (this is preliminary)
-rollsignaltemp = rollsignal2.copy()
-rollsignaltemp['is_group'] = rollsignaltemp.groupby(['signal_family', 'oos_begin_year'])\
-    ['tstat_is'].transform(lambda x: pd.qcut(x, n_groups, labels=np.arange(1,n_groups+1)\
-                                    , duplicates='drop'))
-
-# function for measuring oos performance
-def tempfun(x):
-    return sum(x < t_oos_h)/len(x)
-
-rollfamoos = rollsignaltemp.groupby(['signal_family', 'oos_begin_year', 'is_group'])\
-    .agg({'tstat_oos': tempfun}).reset_index()
-rollfamoos = rollfamoos.rename(columns={'tstat_oos': 'Pr_oos_lt_h'})
-
-# merge onto rollfamsum
-rollfamsum = rollfamsum.merge(rollfamoos, on=['signal_family', 'oos_begin_year', 'is_group'])
-
-# aggregate over years
-sum_is_group = rollfamsum.query('@mean_begin <= oos_begin_year <= @mean_end')\
-    .groupby(['signal_family','is_group'])\
-    .agg(
-        tstat_min = ('tstat_min', np.mean)
-        , tstat_max = ('tstat_max', np.mean)
-        , Pr_null = ('Pr_null', np.mean)
-        , FDR_UB = ('FDR_UB', np.mean)
-        , SD_FDR_UB = ('FDR_UB', np.std)
-        , Pr_oos_lt_h = ('Pr_oos_lt_h', np.mean)
-        , SD_Pr_oos_lt_h = ('Pr_oos_lt_h', np.std)
-        , nobs = ('Pr_oos_lt_h', 'count')
-    )\
-    .reset_index()
-
-# plot
-family_list = sum_is_group['signal_family'].unique()
-df = rollfamsum.dropna(subset=['tstat_max']).query('@mean_begin <= oos_begin_year <= @mean_end')\
-    .groupby('signal_family')[['oos_begin_year']].agg(
-        min_yr = ('oos_begin_year', np.min),
-        max_yr = ('oos_begin_year', np.max)
+    # get family-bin average and SD
+    df = temp.groupby(['signal_family', 'bin'], observed=True).agg(
+        {'ret_is': 'mean',
+        'ret_oos': 'mean',
+        'pred_ret': 'mean'}
         )
-
-with PdfPages(path_figs / 'fdr_vs_oos_cross.pdf') as pdf: 
-    for family_cur in family_list:
-        fig, ax = plt.subplots(figsize=(10, 7))
     
-        temp = sum_is_group.query("signal_family == @family_cur").copy()   
-        min_yr, max_yr = df.loc[family_cur].values
+    df_se = temp.groupby(['signal_family', 'bin'], observed=True).agg(
+        {'ret_oos': ['std', 'count']})
+    df_se.columns = [c[1] for c in df_se.columns]
+    df_se = (df_se['std']/np.sqrt(df_se['count']*oos_freq_adj)
+             ).to_frame('se_ret_oos')
+    df = df.merge(df_se, how='left', on=['signal_family', 'bin'])
     
-        # choose standard error 
-        # (I suppose we could use instead sqrt(pq/n))
-        temp['SE_oos'] = n_se_plot*temp['SD_Pr_oos_lt_h'] / np.sqrt(temp['nobs'])
+    
+    fig = plt.figure(figsize=(8,9))
+    for i, family in enumerate(families_use):
         
-        # main plots
-        ax.plot(temp['is_group'], temp['FDR_UB'], color='red', alpha=0.7, label='FDR upper bound')
-        ax.errorbar(temp['is_group'], temp['Pr_oos_lt_h'], yerr=temp['SE_oos'],
-            fmt='o', color='blue', alpha=0.7, label=leglab_oos)
+        df1 = df.loc[family]
+        ax = fig.add_subplot(3,2,i+1)
         
-        # label
-        ax.set_title(f'{family_cur} {mean_begin}-{mean_end} \n')
-        ax.set_xlabel('In-sample t-stat group')
-        ax.set_ylabel('Probability')
-        # fix y limits
-        ax.set_ylim([0, 1])
-        # legend
-        ax.legend() 
-        # guide line at 0.5
-        ax.axhline(y=0.5, color='black', alpha=0.7, linestyle='--')
-        # y ticks
-        ax.set_yticks(np.arange(0,1.1,0.1))
-        ax.set_xticks(temp['is_group'].values)
+        ax.axhline(y=0, color='grey', alpha=0.7, linewidth=1) 
+        ax.plot(df1.index, df1['ret_is'], color='grey', linestyle='--', alpha=0.7, 
+                label='In-Samp')
+        ax.errorbar(df1.index, df1['ret_oos'], yerr=df1['se_ret_oos']*1.96, 
+                    fmt='o', markersize=5, color=COLORS[0], alpha=0.8, label='OOS')
+        ax.plot(df1.index, df1['pred_ret'], color='red', alpha=0.8, 
+                label='Predicted')
+        ax.set_ylim(-12, 12)
+        plt.title(f'{FAMILY_LONG_NAME[family]}', fontsize=12)
+        
 
-        pdf.savefig(bbox_inches="tight") 
-        plt.show(); plt.close()
+        if i == 0:
+            plt.legend(loc='upper left')
+        if i in [4, 5]:
+            ax.set_xlabel('In-sample return group', fontsize=12)
+        if i == 2:
+            ax.set_ylabel('Long-Short Return (% ann)', fontsize=12)
+        
+    plt.subplots_adjust(hspace=0.3)
+    fig.savefig(path_figs / f'pred-vs-oos-withIS-{year_min}-{year_max}.pdf', format='pdf', 
+                bbox_inches="tight")
+    plt.show()
+    
+
+#%% Get best strategies based on predicted return, then compute OOS return
+
+families_ew = [f for f in families_use if f.endswith('_ew') ]
+family_set = {
+    '1 all': families_use, 
+    '2 acct only': ['acct_ew', 'acct_vw'], 
+    '3 acct ew only': ['acct_ew'], 
+    '4 pastret only': ['past_ret_ew', 'past_ret_vw'],
+    '5 ew only': families_ew
+    }
+
+extreme_ranks = [1, 5, 10]
+
+
+df_best_ret = []
+cols = ['oos_begin_year', 'pred_ret', 'ret_oos']
+for label, family_ls in family_set.items():
+    
+    df = df_ret_predict.query('signal_family in @family_ls')[cols].copy()
+    df['rank_pct'] = df.groupby('oos_begin_year')['pred_ret'].transform(
+        lambda x: x.rank(pct=True)) * 100
+    
+    for rank in extreme_ranks:
+        
+        df['port'] = np.where(df['rank_pct']<=rank, 'short',
+                              np.where(df['rank_pct'] > 100-rank, 'long', 'neutral')
+                              )
+
+        df1 = df.groupby(['port', 'oos_begin_year'])['ret_oos'].agg(
+            ['mean', 'std', 'count'])
+        df2 = (df1.loc['long', 'mean'] - df1.loc['short', 'mean']).to_frame('ret_oos')
+        df2['nstrat'] = df1.loc['long', 'count'] + df1.loc['short', 'count']
+        df2['pctmin'] = rank
+        df2['family_grp'] = label
+        
+        df_best_ret.append(df2)
+    
+df_best_ret = pd.concat(df_best_ret).reset_index()   
+    
+
+
+extreme_ranks_plot = [1, 5, 10]
+
+# plot cumulative performance of top n% strategies
+df = df_best_ret.query("family_grp == '1 all' & pctmin in @extreme_ranks_plot")
+df = df.pivot(columns=['pctmin'], index='oos_begin_year', values='ret_oos').sort_index()
+df.columns = [f'{int(c)}%' for c in df.columns]
+df = (1 + df/100).cumprod()
+ax = df.plot(figsize=(7,5), style=['-', '--', '-.'])    
+ax.set_ylabel('Value of $1 Invvested in 1983') 
+ax.set_xlabel('') 
+plt.legend(title='Using Strats in Extreme', alignment='left')
+fig.savefig(path_figs / 'beststrats-cret.pdf', format='pdf', bbox_inches="tight")
+plt.show()   
+    
+    
+    
+
+#### prepare data for summarizing best performing strategies
+
+samp_split = 2004
+samp_start = df_best_ret['oos_begin_year'].min()
+samp_end = df_best_ret['oos_begin_year'].max()
+
+# for comparison, read in CZ returns
+pubret0 = pd.read_csv(path_input / 'PredictorLSretWide.csv')
+pubdoc = pd.read_excel(path_input / 'PredictorSummary.xlsx')
+pubdoc = pubdoc[['signalname', 'Year', 'SampleEndYear']].rename(
+    columns={'Year':'pubyear', 'SampleEndYear':'sampend'})
+
+# process CZ returns 
+pubret = pd.melt(pubret0, id_vars='date', var_name='signalname', value_name='ret')
+pubret = pubret.query('ret.notnull()')
+pubret['date'] = pd.to_datetime(pubret['date'])
+pubret['year'] = pubret['date'].dt.year
+pubret = pubret.query('@samp_start <= year <= @samp_end')
+pubret = pubret.merge(pubdoc, how='left', on='signalname')
+pubret['ret'] = pubret['ret'] * ret_freq_adj
+
+pubcomb = []
+for nm, max_yr in [('Pub Anytime', samp_end), ('Pub Pre-2004', samp_split)]:
+    df1 = pubret.query('pubyear <= @max_yr')
+    df1 = df1.groupby(['year', 'signalname'])[['ret']].mean()
+    df1 = df1.groupby('year').agg({'ret': ['mean', 'count']})
+    df1.columns = [f'{c[0]}_{c[1]}' for c in df1.columns]
+    df1 = df1.rename(columns={'ret_mean': 'ret', 'ret_count': 'nstrat'})
+    df1['name'] = nm
+    pubcomb.append(df1.reset_index())
+pubcomb = pd.concat(pubcomb)
+
+
+# merge CZ with best performing strategies
+best_sumr = df_best_ret.query("family_grp == '1 all'").drop(columns=['family_grp'])
+best_sumr['pctmin'] = best_sumr['pctmin'].replace(
+    {1: 'DM Extreme 1\%', 5: 'DM Extreme 5\%', 10: 'DM Extreme 10\%',})
+best_sumr = best_sumr.rename(columns={'pctmin': 'name', 'ret_oos':'ret', 
+                                      'oos_begin_year': 'year'})
+best_sumr = pd.concat([best_sumr, pubcomb])
+
+
+# prepare table with best strategies summary
+tabdat = []
+sample_ls = [(1983, 2020), (1983, 2004), (2005, 2020)]
+for min_yr, max_yr in sample_ls:
+    df = best_sumr.query("@min_yr<=year<=@max_yr")
+    df = df.groupby(["name"]).agg({
+        'ret': ['mean', 'std', 'count'],
+        'nstrat': 'mean'}
+        )
+    df.columns = [f'{c0}_{c1}' for c0, c1 in df.columns]
+    df['sr'] = df.eval('ret_mean/ret_std')
+    df['tstat'] = df.eval('ret_mean/ret_std*sqrt(ret_count)')
+    df = df.drop(columns=['ret_std', 'ret_count'])
+    df = df[['nstrat_mean', 'ret_mean', 'tstat', 'sr']]
+    df = df.loc[['DM Extreme 1\%', 'DM Extreme 5\%', 'DM Extreme 10\%', 'Pub Anytime',
+                 'Pub Pre-2004']]
+    line = pd.DataFrame(index=[f'{min_yr}-{max_yr}'], columns=df.columns)
+    df = pd.concat([line, df])
+    df.loc[''] = np.nan
+    tabdat.append(df)
+tabdat = pd.concat(tabdat).iloc[:-1]
+cols = ['ret_mean', 'tstat', 'sr']
+tabdat[cols] = tabdat[cols].applymap(lambda x: f'{x:.2f}')
+tabdat['nstrat_mean'] = tabdat['nstrat_mean'].apply(lambda x: f'{x:.0f}')
+tabdat = tabdat.replace({'nan': ''}).rename(
+    columns={'nstrat_mean': '\makecell{Num Strats \\\\ Combined}', 
+             'ret_mean': '\makecell{Mean Return \\\\ (\% ann)}', 
+             'tstat': '$t$-stat', 'sr': '\makecell{Sharpe Ratio \\\\ (ann)}'})
+
+# covert table to latex
+col_format = 'l' + 'c' * tabdat.shape[1]
+latex_table = tabdat.style.to_latex(column_format = col_format, hrules=True)
+print(latex_table)
+
+
+# clean latex table to saving and export it
+part = r'\\\\\nPub Anytime'
+repl = r'\\\\\n\\hline\nPub Anytime'
+latex_tableF = re.sub(part, repl, latex_table)
+part = r'\\\\\n &  &  &  &'
+repl = r'\\\\\n\\hline\n &  &  &  &'
+latex_tableF = re.sub(part, repl, latex_tableF)
+part = r'(\n\d{4}\-\d{4} &  &  &  &  \\\\\n)'
+repl =  r'\1\\hline\n'
+latex_tableF = re.sub(part, repl, latex_tableF)
+print(latex_tableF)
+
+with open(path_tables / 'beststrats.tex', 'w') as fh:
+    fh.write(latex_table)
+
+
+#%% HLZ's preferred Benji-Yeki Theorem 1.3 control 
+
+tempsum = rollsignal1.groupby(['signal_family', 'oos_begin_year']
+                              )['signalid'].count().to_frame('Nstrat')
+tempsum['BY1.3_penalty'] = tempsum['Nstrat'].apply(lambda x: sum(1/np.arange(1, x+1)))
+
+
+df_FDR = rollsignal1.merge(tempsum, how='left', 
+                                  on=['signal_family', 'oos_begin_year'])
+
+df_FDR['tabs_is'] = df_FDR['tstat_is'].abs()
+df_FDR['Pr_emp'] = df_FDR.groupby(['signal_family', 'oos_begin_year'])[
+    'tabs_is'].transform(lambda x: x.rank(pct=True, ascending=False))
+df_FDR['Pr_null'] = 2*norm.cdf(-df_FDR['tabs_is'].values)
+df_FDR['FDRmax_BH'] = df_FDR.eval('Pr_null/Pr_emp')
+df_FDR['FDRmax_BY1.3'] = df_FDR['FDRmax_BH']*df_FDR['BY1.3_penalty']
+
+
+# find t-stat hurdles
+crit_ls = np.array([1, 5, 10])/100
+rollfamFDR = []
+for crit in crit_ls:
+    df = df_FDR[df_FDR['FDRmax_BY1.3'] <= crit] 
+    df = df.groupby(['signal_family', 'oos_begin_year'])[
+        'tabs_is'].min().to_frame('tabs_hurdle')
+    df['crit_level'] = crit
+    rollfamFDR.append(df)
+rollfamFDR = pd.concat(rollfamFDR).reset_index()
+
+
+# define hurdle as max(tstat_is)+1 if no signals pass
+df = df_FDR.groupby(['signal_family', 'oos_begin_year'])[
+    'tabs_is'].max().to_frame('tabs_max')
+temp = []
+for crit in crit_ls:
+    df1 = df.copy()
+    df1['crit_level'] = crit
+    temp.append(df1)
+temp = pd.concat(temp).reset_index()  
+rollfamFDR = temp.merge(rollfamFDR, how='left', 
+                       on=['signal_family', 'oos_begin_year', 'crit_level'])
+rollfamFDR['tabs_hurdle'] = np.where(rollfamFDR['tabs_hurdle'].isnull(), 
+                                   rollfamFDR['tabs_max']+1, rollfamFDR['tabs_hurdle'])
+
+
+# find oos returns by tstat bin
+ngroup = 20
+rollbin = rollsignal1.copy()
+rollbin['group'] = rollbin.groupby(['signal_family', 'oos_begin_year'])[
+    'tstat_is'].transform(lambda x: pd.qcut(x, ngroup, labels=np.arange(1,ngroup+1))
+                          ).astype(int)
+rollbin = rollbin.groupby(['signal_family', 'oos_begin_year', 'group']).agg(
+    {'ret_oos': 'mean',
+     'ret_is': 'mean',
+     'tstat_is': 'mean',
+     }).reset_index()
 
 
 
-#%% Let the user know whats up
+# prepare result and plot 
 
-print('saved pdf figures to ' + str(path_figs))
+sample_ls = [(1983, 2020), (1983, 2004), (2005, 2020)]
+for min_yr, max_yr in sample_ls:
+    sumfamFDR = rollfamFDR.query('@min_yr <= oos_begin_year <= @max_yr')
+    sumfamFDR = sumfamFDR.groupby(['signal_family', 'crit_level'])['tabs_hurdle'].mean()
+    sumfamFDR = sumfamFDR.unstack()
+    sumfamFDR.columns = [f'crit_{v}' for v in sumfamFDR.columns]
+
+    temp = rollbin.query('@min_yr <= oos_begin_year <= @max_yr')
+    sumbin = temp.groupby(['signal_family', 'group'], observed=True).agg(
+        {'ret_is': 'mean',
+        'ret_oos': 'mean',
+        'tstat_is': 'mean'}
+        ).reset_index()
+    
+    df_se = temp.groupby(['signal_family', 'group'], observed=True).agg(
+        {'ret_oos': ['std', 'count']})
+    df_se.columns = [c[1] for c in df_se.columns]
+    df_se = (df_se['std']/np.sqrt(df_se['count']*oos_freq_adj)
+             ).to_frame('se_ret_oos')
+    sumbin = sumbin.merge(df_se, how='left', on=['signal_family', 'group'])
+
+    sumbin = sumbin.merge(sumfamFDR, how='left', on='signal_family'
+                          ).set_index(['signal_family', 'group'])
+
+    # create plots    
+    fig = plt.figure(figsize=(8,9))
+    for i, family in enumerate(families_use):
+        
+        df = sumbin.loc[family]
+        ax = fig.add_subplot(3,2,i+1)
+        
+        ax.axhline(y=0, color='grey', alpha=0.9, linewidth=1) 
+        ax.errorbar(df['tstat_is'], df['ret_oos'], yerr=df['se_ret_oos']*1.96, 
+                    fmt='o', markersize=5, color='k', alpha=0.8)
+        
+        ax.axvline(x=df['crit_0.01'].iloc[0], color='r', label='BY1.3: FDR<1%')
+        ax.axvline(x=-df['crit_0.01'].iloc[0], color='r')
+        
+        ax.axvline(x=df['crit_0.05'].iloc[0], color='purple', linestyle='--',
+                    label='BY1.3: FDR<5%')
+        ax.axvline(x=-df['crit_0.05'].iloc[0], color='purple', linestyle='--')
+
+        
+        ax.set_ylim(-10, 15)
+        ax.set_xlim(-6, 6)
+        plt.title(f'{FAMILY_LONG_NAME[family]}', fontsize=12)
+        
+
+        if i == 0:
+            plt.legend(loc='upper center', fontsize=10)
+        if i in [4, 5]:
+            ax.set_xlabel('In-sample $t$-statistic', fontsize=12)
+        if i == 2:
+            ax.set_ylabel('Out of Sample Long-Short Return (% ann)', fontsize=12)
+        
+    plt.subplots_adjust(hspace=0.3)
+    fig.savefig(path_figs / f'BY1.3-{min_yr}-{max_yr}.pdf', format='pdf', bbox_inches="tight")
+    plt.show()
+
+    

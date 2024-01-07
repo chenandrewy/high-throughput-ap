@@ -47,8 +47,8 @@ else:
 MachineUsed = 1
 
 if MachineUsed==1: # Chuks 
-    path_input = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Andrew/Data/')
-    path_output = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Data/')
+    path_input = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/')
+    path_output = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/')
     path_figs = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Figures/')
     path_tables = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Tables/')
 elif MachineUsed==2: # Andrew 
@@ -65,7 +65,7 @@ elif MachineUsed==2: # Andrew
 
 
 
-#%%
+#%% load returns data to select stocks in our universe
 
 
 # load crsp monthly returns from r-data format
@@ -87,7 +87,7 @@ del df_crspm
 
 
 
-#%% down ravenpack news data
+#%% download ravenpack news data
 
 
 db = wrds.Connection(wrds_username='ccdim')
@@ -140,6 +140,7 @@ df_rp = df_rp.set_index('obs_id')
 df_rp = df_rp.drop(columns=['rp_entity_id'])
 
 
+# File is large so save as parquet for quick reading later
 df_rp.to_parquet(path_output / 'RavenPack_ess.parquet')
 
 #%%
