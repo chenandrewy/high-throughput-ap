@@ -50,7 +50,7 @@ elif MachineUsed == 2:  # Andrew
 
 # Select rolling t-stat / oos file
 rollsignal_file = "OOS_signal_tstat_OosNyears1.csv.gzip"
-rvpk_rollsignal_file = "RvPk_OOS_signal_tstat_IsNyears5_OosNyears1.csv.gzip"
+# rvpk_rollsignal_file = "RvPk_OOS_signal_tstat_IsNyears5_OosNyears1.csv.gzip"
 
 
 
@@ -156,10 +156,8 @@ def predict_fam(mixnorm, tstatvec, retvec):
 # load up signal level data
 rollsignal0 = pd.read_csv(path_input / rollsignal_file)
 
-# load ravenpack signal data: currently based on differently IS window
-df_rvpk = pd.read_csv(path_output / rvpk_rollsignal_file)
-
-# rollsignal0 = pd.concat([rollsignal0, df_rvpk])
+# drop ravenpack for now
+rollsignal0 = rollsignal0.query('~signal_family.str.startswith("RavenPack")')
 
 rollsignal0['ret'] = rollsignal0['mean_ret'] * ret_freq_adj
 rollsignal0["s_flag"] = rollsignal0["s_flag"].str.lower()
@@ -460,7 +458,7 @@ latex_table = tabdat.style.to_latex(column_format = col_format, hrules=True)
 print(latex_table)
 
 
-# clean latex table to saving and export it
+# clean latex table for saving and export it
 part = r'\\\\\nPub Anytime'
 repl = r'\\\\\n\\hline\nPub Anytime'
 latex_tableF = re.sub(part, repl, latex_table)
