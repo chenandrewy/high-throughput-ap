@@ -85,7 +85,7 @@ estimate_qml = function(par_guess, est_names, opt_set, tstatvec){
     # clean up and take mean
     singlelikes[singlelikes<=0] = 1e-6
     
-    return = -1*mean(log(singlelikes))
+    return = -1*sum(log(singlelikes))
   }
 
   # translate par_guess to parvec_guess
@@ -178,13 +178,15 @@ cmd_option_list = list(
 )
 cmd_opt <- OptionParser(option_list = cmd_option_list) %>% parse_args()
 
-# select distribution family for theta and baseline guess
-# (see globals above)
-par_guess0 = par_base_mixnorm 
+# select distfams for model comparison
+par_g_list = list(par_base_mixnorm, par_base_norm)
 
 # select parameters that you want to estimate
 # (could choose a subset manually)
-est_names = names(par_guess0)[names(par_guess0)!= 'distfam'] # chooses everything
+for (i in 1:length(par_g_list)){
+  if (i==1){par_name_list = list()}
+  par_name_list[[i]] = names(par_g_list[[i]])[names(par_g_list[[i]])!= 'distfam'] # chooses everything
+}
 
 # Compute shrinkage for all family-years =======================================
 # 2 sec per family-year, about 10 minutes total
@@ -204,39 +206,25 @@ for (i in 1:nrow(fam_yr_list)){
   yr = fam_yr_list[i, oos_begin_year]
   print(paste(signalfam, yr, '===================='))
 
-  # choose guess: use last estimate if available
-  par_guess = par_guess0
-  if (yr>min(fam_yr_list$oos_begin_year)){
-    if (list.qml[[i-1]]$distfam == par_guess0$distfam){
-      par_guess = list.qml[[i-1]] %>% select(all_of(names(par_guess0)))     
-    }
-  }
-
   # select data
   tempdat = rollsignal_is[signal_family==signalfam & oos_begin_year==yr, ]
 
-  # estimate theta properties 
-  tempqml = estimate_qml(par_guess, est_names, opt_set, tempdat$tstat)
-
-  # patch mixnorm if siga or sigb is too small or pa too close to 0 or 1
-  # (this leads to numerical integration problems and implies 
-  #  that a single normal is a better fit)
-  if (tempqml$parhat$distfam == 'mixnorm'){
-    tinysig = 0.005
-    tinyprob = 0.005
-    if (exp(tempqml$parhat$log_siga) < tinysig | 
-        exp(tempqml$parhat$log_sigb) < tinysig |
-        logistic(tempqml$parhat$logit_pa) < tinyprob | 
-        logistic(tempqml$parhat$logit_pa) > 1-tinyprob){
-      par_guess = par_base_norm
-      est_names = names(par_guess)[names(par_guess)!= 'distfam']
-      tempqml = estimate_qml(par_guess, est_names, opt_set, tempdat$tstat)      
-
-      # reset par_guess to initial mixnorm 
-      par_guess = par_guess0
-      est_names = names(par_guess)[names(par_guess)!= 'distfam']
-    }
-  } # end patch mixnorm
+  # estimate theta properties for each par_g_list item
+  tempqmllist = list()
+  for (iguess in 1:length(par_g_list)){
+    tempqmllist[[iguess]] = estimate_qml(par_g_list[[iguess]], par_name_list[[iguess]], 
+        opt_set, tempdat$tstat)
+    # evaluate BIC
+    tempqmllist[[iguess]]$bic = 0*length(par_name_list[[iguess]])*log(length(tempdat$tstat)) - 
+      2*tempqmllist[[iguess]]$loglike
+    # evaluate AIC (not used)
+    tempqmllist[[iguess]]$aic = 2*length(par_name_list[[iguess]]) - 
+      2*tempqmllist[[iguess]]$loglike
+  }
+  
+  # find estimate with lowest BIC
+  bicvec = sapply(tempqmllist, function(x) x$bic) 
+  tempqml = tempqmllist[[which.min(bicvec)]]
 
   # compute shrinkage function
   thetahat_fun = make_thetahat_interpolant(tempqml$parhat)
@@ -251,8 +239,8 @@ for (i in 1:nrow(fam_yr_list)){
     summarise(pred_ret = mean(pred_ret), mean_ret = mean(mean_ret)) %>% 
     mutate(shrink = 1-pred_ret/mean_ret) 
   print(tempqml$parhat)
-  print(paste0('shrink for |t|>2 = ', round(mean(tempfeed$shrink),3)))
-  print(paste0('time = ', round(Sys.time()-tic,1)))
+  print(paste0('shrinkage for |t|>2 = ', round(mean(tempfeed$shrink),3)))
+  print(paste0('time for family-year = ', round(Sys.time()-tic,1)))
 
   # save
   # qml estimates
@@ -271,8 +259,7 @@ for (i in 1:nrow(fam_yr_list)){
 # Save all estimates to disk ========================================================
 
 # clean up list.qml
-# for (i in 1:length(list.qml)){
-  for (i in 1:4){
+for (i in 1:length(list.qml)){
   if (i==1){list.qml2 = list()}
   tempq = list.qml[[i]]
 
@@ -301,19 +288,16 @@ fwrite(family_year_qml, file = paste0(cmd_opt$data_path, cmd_opt$out_prefix, '_Q
 fwrite(signal_year_predict, file = paste0(cmd_opt$data_path, cmd_opt$out_prefix, '_Predict_SignalYear.csv.gzip'))
 
 # Debug: Output some plots ========================================================
-# need to run Environment and User selections first
+# need to run Environment and options parsing first
 
-# load data
-family_year_qml = fread(paste0(cmd_opt$data_path, 'QML_FamilyYear.csv.gzip'))
-signal_year_predict = fread(paste0(cmd_opt$data_path, 'Predict_SignalYear.csv.gzip'))
+# load data, if desired
+# family_year_qml = fread(paste0(cmd_opt$data_path, 'QML_FamilyYear.csv.gzip'))
+# signal_year_predict = fread(paste0(cmd_opt$data_path, 'Predict_SignalYear.csv.gzip'))
 
 ## Select a family-year
 # family_year_qml %>% distinct(signal_family) %>% print()
-signalfam = 'ticker_Harvey2017JF_vw'
-yr = 1994
-
-# signalfam = 'RavenPackSignalsLongShort_ew'
-# yr = 2010
+signalfam = 'PastReturnSignalsLongShort_ew'
+yr = 1987
 
 # get theta par estimates
 qml = family_year_qml[signal_family==signalfam & oos_begin_year==yr, ]
@@ -331,7 +315,7 @@ colnames(parhat) = c('distfam', par_names)
 tstatdat = signal_year_predict[signal_family==signalfam & oos_begin_year==yr, ]
 
 # alternative estimate
-par_guess = par_base_ngamma
+par_guess = par_base_mixnorm
 est_names = names(par_guess)[names(par_guess)!= 'distfam']
 
 qml_alt = estimate_qml(par_guess, est_names, opt_set, tstatdat$tstat)
