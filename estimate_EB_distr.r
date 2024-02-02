@@ -1,4 +1,13 @@
 # 2024 01 flexible distr EB estimation
+# uses python style command line option parsing
+# should be able to run with 
+# Rscript estimate_EB_distr.r --data_path ../../Data/ --rollsignal_name OOS_signal_tstat_OosNyears1.csv.gzip --out_prefix Debug_
+# or 
+# shell('Rscript estimate_EB_distr.r --data_path ../../Data/ --rollsignal_name OOS_signal_tstat_OosNyears1.csv.gzip --out_prefix Debug_')
+# see Option Parsing section for details
+
+# takes about 10-20 min
+
 # Environment ========================================================
 rm(list = ls())
 
@@ -8,6 +17,7 @@ library(data.table)
 library(distr)
 library(nloptr)
 library(gridExtra)
+library(optparse)
 
 ## Functions ====
 # logit and logistic functions for ease of notation
@@ -33,6 +43,26 @@ make_theta_object = function(par){
     stop('distfam not recognized')
   }
   return(theta_o)
+}
+
+# function for converting theta par to natural units --
+# (not used)
+transform_par_units = function(par){
+  parnat = data.frame(distfamily = par$distfam)
+  parnat = if (par$distfam == 'norm'){
+    parnat = parnat %>% mutate(mu = par$mu, sig = exp(par$log_sig))
+  } else if (par$distfam == 'mixnorm'){
+    parnat = parnat %>% mutate(
+      mua = par$mua, siga = exp(par$log_siga), 
+      mub = par$mub, sigb = exp(par$log_sigb), 
+      pa = logistic(par$logit_pa)
+    )
+  } else if (par$distfam == 'ngamma'){
+    parnat = parnat %>% mutate(loc = par$loc, shape = exp(par$log_shape), scale = exp(par$log_scale))
+  } else {
+    stop('distfam not recognized')
+  }
+  return = parnat
 }
 
 # function for estimating theta object via qml --
@@ -135,10 +165,18 @@ opt_set = list(algorithm = 'NLOPT_LN_BOBYQA', # use quadratic approx of obj
                   ftol_rel = 1e-6,
                   print_level = 0)
 
-# User selections ========================================================
+# Option Parsing ========================================================
 
-# data path (should depend on user...)
-data_path = '../../Data/'
+# command line options
+cmd_option_list = list(
+  make_option(c("-d", "--data_path"), type="character", default="../../Data/",
+    help="Path to data directory"),
+  make_option(c("-r", "--rollsignal_name"), type="character", default="OOS_signal_tstat_OosNyears1.csv.gzip",
+    help="Name of roll signal file"),
+  make_option(c("-o", "--out_prefix"), type="character", default="Debug_",
+    help="Output prefix for saved files")
+)
+cmd_opt <- OptionParser(option_list = cmd_option_list) %>% parse_args()
 
 # select distribution family for theta and baseline guess
 # (see globals above)
@@ -152,7 +190,7 @@ est_names = names(par_guess0)[names(par_guess0)!= 'distfam'] # chooses everythin
 # 2 sec per family-year, about 10 minutes total
 
 # setup
-rollsignal = fread(paste0(data_path, 'OOS_signal_tstat_OosNyears1.csv.gzip'))
+rollsignal = fread(paste0(cmd_opt$data_path, cmd_opt$rollsignal_name))
 rollsignal_is = rollsignal[s_flag=='IS',]
 fam_yr_list = rollsignal %>% distinct(signal_family, oos_begin_year) %>% 
   arrange(signal_family, oos_begin_year)
@@ -233,7 +271,8 @@ for (i in 1:nrow(fam_yr_list)){
 # Save all estimates to disk ========================================================
 
 # clean up list.qml
-for (i in 1:length(list.qml)){
+# for (i in 1:length(list.qml)){
+  for (i in 1:4){
   if (i==1){list.qml2 = list()}
   tempq = list.qml[[i]]
 
@@ -258,25 +297,35 @@ family_year_qml = bind_rows(list.qml2)
 signal_year_predict = rbindlist(list.pred_ret)
 
 # save
-fwrite(family_year_qml, file = paste0(data_path, 'QML_FamilyYear.csv.gzip'))
-fwrite(signal_year_predict, file = paste0(data_path, 'Predict_SignalYear.csv.gzip'))
+fwrite(family_year_qml, file = paste0(cmd_opt$data_path, cmd_opt$out_prefix, '_QML_FamilyYear.csv.gzip'))
+fwrite(signal_year_predict, file = paste0(cmd_opt$data_path, cmd_opt$out_prefix, '_Predict_SignalYear.csv.gzip'))
 
 # Debug: Output some plots ========================================================
+# need to run Environment and User selections first
 
 # load data
-family_year_qml = fread(paste0(data_path, 'QML_FamilyYear.csv.gzip'))
-signal_year_predict = fread(paste0(data_path, 'Predict_SignalYear.csv.gzip'))
+family_year_qml = fread(paste0(cmd_opt$data_path, 'QML_FamilyYear.csv.gzip'))
+signal_year_predict = fread(paste0(cmd_opt$data_path, 'Predict_SignalYear.csv.gzip'))
 
 ## Select a family-year
 # family_year_qml %>% distinct(signal_family) %>% print()
-signalfam = 'PastReturnSignalsLongShort_ew'
-yr = 1983
+signalfam = 'ticker_Harvey2017JF_vw'
+yr = 1994
+
+# signalfam = 'RavenPackSignalsLongShort_ew'
+# yr = 2010
 
 # get theta par estimates
 qml = family_year_qml[signal_family==signalfam & oos_begin_year==yr, ]
-par_names = qml$par_names %>% strsplit('\\|')
-parhat = qml %>% select(distfam, starts_with('par')) %>% select(-par_names)
-colnames(parhat) = c('distfam', unlist(par_names))
+
+# extract names, translate par1, par2, to mu, sig, etc
+par_names = qml$par_names %>% strsplit('\\|') 
+par_names = par_names[[1]]
+npar = length(par_names)
+
+parhat = qml %>% select(distfam, starts_with('par')) %>% select(-par_names) 
+parhat = parhat[ , 1:(npar+1)]
+colnames(parhat) = c('distfam', par_names)
 
 # get shrinkage predictions
 tstatdat = signal_year_predict[signal_family==signalfam & oos_begin_year==yr, ]
@@ -359,3 +408,4 @@ tstatdat %>%
   ) %>% 
   mutate(1-pred_ret/mean_ret) %>% 
   filter(bin >= 18 | bin <= 3) 
+
