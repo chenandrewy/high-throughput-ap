@@ -116,15 +116,21 @@ predict_theta = function(theta_o, tstat){
   f_joint = function(theta_temp,tstat){
     dnorm(tstat,theta_temp,1) * d(theta_o)(theta_temp) 
   }
-
-  # calculate E(theta|tstat)
-  numer = integrate(
-    function(theta_temp) theta_temp*f_joint(theta_temp,tstat),
-    -Inf, Inf)$value
-  denom = integrate(
-    function(theta_temp) f_joint(theta_temp,tstat),
-    -Inf, Inf)$value
-
+  
+  # Find E(theta|tstat)
+  # but split integrals into better-behaved parts
+  theta_grid = c(-Inf, seq(-8,8,1), Inf)
+  numer = 0
+  denom = 0
+  for (thetai in 2:length(theta_grid)){
+    numer = numer + integrate(
+      function(theta_temp) theta_temp*f_joint(theta_temp,tstat),
+      theta_grid[thetai-1], theta_grid[thetai])$value
+    denom = denom + integrate(
+      function(theta_temp) f_joint(theta_temp,tstat),
+      theta_grid[thetai-1], theta_grid[thetai])$value
+  } # end for thetai
+  
   # output 
   Etheta_Ctstat = numer/denom
   return = Etheta_Ctstat
@@ -165,7 +171,7 @@ opt_set = list(algorithm = 'NLOPT_LN_BOBYQA', # use quadratic approx of obj
                   ftol_rel = 1e-6,
                   print_level = 0)
 
-# Option Parsing ========================================================
+# Option Parsing / User Entry ========================================================
 
 # command line options
 cmd_option_list = list(
@@ -179,7 +185,8 @@ cmd_option_list = list(
 cmd_opt <- OptionParser(option_list = cmd_option_list) %>% parse_args()
 
 # select distfams for model comparison
-par_g_list = list(par_base_mixnorm, par_base_norm)
+# par_g_list = list(par_base_mixnorm, par_base_norm) # use BIC to select mixnorm vs norm
+par_g_list = list(par_base_mixnorm) # use only mixnor
 
 # select parameters that you want to estimate
 # (could choose a subset manually)
@@ -200,7 +207,7 @@ fam_yr_list = rollsignal %>% distinct(signal_family, oos_begin_year) %>%
 # loop over all family-years
 for (i in 1:nrow(fam_yr_list)){
   if (i==1){list.qml = list(); list.pred_ret = list()}
-
+  
   tic = Sys.time()
   signalfam = fam_yr_list[i, signal_family]
   yr = fam_yr_list[i, oos_begin_year]
@@ -215,7 +222,7 @@ for (i in 1:nrow(fam_yr_list)){
     tempqmllist[[iguess]] = estimate_qml(par_g_list[[iguess]], par_name_list[[iguess]], 
         opt_set, tempdat$tstat)
     # evaluate BIC
-    tempqmllist[[iguess]]$bic = 0*length(par_name_list[[iguess]])*log(length(tempdat$tstat)) - 
+    tempqmllist[[iguess]]$bic = 1*length(par_name_list[[iguess]])*log(length(tempdat$tstat)) - 
       2*tempqmllist[[iguess]]$loglike
     # evaluate AIC (not used)
     tempqmllist[[iguess]]$aic = 2*length(par_name_list[[iguess]]) - 
@@ -228,7 +235,7 @@ for (i in 1:nrow(fam_yr_list)){
 
   # compute shrinkage function
   thetahat_fun = make_thetahat_interpolant(tempqml$parhat)
-
+  
   # evaluate thetahat_fun for each tstatdat$tstat
   tempdat[ , thetahat := thetahat_fun(tstat)][
     , pred_ret := thetahat*mean_ret/tstat]
@@ -249,7 +256,6 @@ for (i in 1:nrow(fam_yr_list)){
       opt_obj = tempqml$opt$objective,
       signal_family = signalfam, oos_begin_year = yr) %>% 
     select(signal_family, oos_begin_year, everything())
-
  
   # shrinkage predictions
   list.pred_ret[[i]] = tempdat 
@@ -392,4 +398,5 @@ tstatdat %>%
   ) %>% 
   mutate(1-pred_ret/mean_ret) %>% 
   filter(bin >= 18 | bin <= 3) 
+
 
