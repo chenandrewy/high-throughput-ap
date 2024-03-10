@@ -67,42 +67,35 @@ elif MachineUsed==2: # Andrew
 
 
 
-def get_signal_long_short_ret(signals_t, value_weight_t, ret_t):
+def get_signal_long_short_ret(signals_t, nm):
     
     # This function constructs long short portfolio for each signal for a specific date
     
     # Require at least 20 stocks -- equivalent to 2 stocks per decile portfolio
     if len(signals_t)<20:
         return {}
-    
-    nm = signals_t.columns[0]
-    
+        
     # take top and bottom 10 percent without explicitly creating all portfolios
-    top_threshold = signals_t[nm].quantile(0.9)
-    bottom_threshold = signals_t[nm].quantile(0.1)
-    signals_t['decile'] = np.where(signals_t[nm]>=top_threshold, 10,
-                                   np.where(signals_t[nm]<=bottom_threshold, 1,
-                                   5))
-    temp = signals_t[(signals_t['decile']==1) | (signals_t['decile']==10)]
+    sig_long_short = {}
+    for port, qnt in [('long', 0.9), ('short', 0.1)]:
+        thresh = signals_t[nm].quantile(qnt)
+        if port=='long':
+            df_port = signals_t[signals_t[nm] >= thresh]
+        elif port=='short':
+            df_port = signals_t[signals_t[nm] <= thresh]
+        
+        
+        # take return and weight and get equal and value-weighted return
+        r = df_port['ret'].values
+        w = df_port['w'].values
+        
+        ret_ew = r.mean()
+        ret_vw = r @ (w/w.sum())
+        
+        sig_long_short[f'{port}_ew'] = ret_ew
+        sig_long_short[f'{port}_vw'] = ret_vw
+        sig_long_short[f'n{port}'] = len(r)
     
-    # merge lag market cap and day t return
-    temp = temp.merge(value_weight_t, how='left', on='permno')
-    temp = temp.merge(ret_t, how='left', on='permno')
-    temp = temp.dropna(subset=['w', 'ret'])
-    temp['nstock'] = 1
-    
-    # normalize weights to sum to 1
-    temp['w'] = temp['w']/temp.groupby('decile')['w'].transform('sum')
-    temp['ret_vw'] = temp.eval('ret * w')
-    
-    # compute value-weighted and equal-weighted portfolio returns
-    temp = temp.groupby('decile').agg({'ret': 'mean', 'ret_vw': 'sum', 'nstock': 'sum'})
-    
-    # now get long short for value weighted and equal-weighted
-    nstock = temp['nstock'].rename({1: 'nshort', 10:'nlong'}).to_dict()
-    temp = temp[['ret', 'ret_vw']].T
-    sig_long_short = (temp[10] - temp[1]).to_dict()
-    sig_long_short = sig_long_short | nstock # concatenate the two dictionaries
     sig_long_short['signalname'] = nm
         
     return sig_long_short
@@ -111,28 +104,34 @@ def get_signal_long_short_ret(signals_t, value_weight_t, ret_t):
 
 
 
-def get_signals_and_returns(df_base_sig, cols, value_weight_t, ret_t):
+def get_signals_and_returns(df_base_sig, ret_w_t, combo, Ncomb):
+        
+    sfx = '_'.join(map(str, combo)) # sufix for signal names    
+    nsig = len(combo)
     
-    sfx = '_'.join(map(str, cols)) # sufix for signal names
-    df = df_base_sig[[*cols]]
+    df = df_base_sig[[*combo]]    
     dfs = np.exp(df) - 1 # simple returns for higher moments
-    
+        
     # compute signals based on cumulative return, std, skewness and kurtosis
-    df_r = df.sum(axis=1, min_count=Ncomb).to_frame(f'ret_{sfx}').dropna() 
-    permnos_use = df_r.index
-    df_std = dfs.std(axis=1).loc[permnos_use].to_frame(f'std_{sfx}')
-    df_skew = dfs.skew(axis=1).loc[permnos_use].to_frame(f'skew_{sfx}')
-    df_kurt = dfs.kurtosis(axis=1).loc[permnos_use].to_frame(f'kurt_{sfx}')
- 
+    df_r = df.sum(axis=1, min_count=nsig).to_frame(f'ret_{sfx}')
+    if nsig < Ncomb: 
+        # when we don't use four quarters don't compute higher moments
+        df_std, df_skew, df_kurt = [pd.DataFrame()]*3
+    else:
+        df_std = dfs.std(axis=1).to_frame(f'std_{sfx}')
+        df_skew = dfs.skew(axis=1).to_frame(f'skew_{sfx}')
+        df_kurt = dfs.kurtosis(axis=1).to_frame(f'kurt_{sfx}')
+                    
+    temp_sig = pd.concat([df_r, df_std, df_skew, df_kurt], axis=1)
+    temp_sig = temp_sig.dropna(subset=[f'ret_{sfx}'])
+    snames = temp_sig.columns
+    temp_sig = temp_sig.join(ret_w_t).dropna()
     
-    temp_sig = [df_r, df_std, df_skew, df_kurt]
-    
-    signal_ret = [get_signal_long_short_ret(signals_t, value_weight_t, ret_t) 
-                  for signals_t in temp_sig]
+    cols_r_w = ['ret', 'w']
+    signal_ret = [get_signal_long_short_ret(temp_sig[[*cols_r_w, nm]], nm) 
+                  for nm in snames]
     
     return signal_ret
-
-
 
 
 
@@ -198,6 +197,12 @@ Ncomb = 4
 signal_names =  np.arange(1, nqtr+1)
 sig_combinations = list(combinations(signal_names, Ncomb))
 
+# add additional quarters for up to q 3:
+add_qtrs1 = [(i,) for i in range(1, nqtr+1)]
+add_qtrs2 = [tuple(np.arange(1, q+1)) for q in range(2, 4)]
+
+sig_combinations = add_qtrs1 + add_qtrs2 + sig_combinations
+
 t_start = reverse_dates_id_map[pd.to_datetime('1962-01-31')]
 t_ls = df_crspm.index[df_crspm.index>=t_start]
 
@@ -208,13 +213,21 @@ with Parallel(n_jobs=CPUUsed, verbose=3) as parallel:
     for t in t_ls:
                 
         # get market value weight on day t-1 for stocks with price above $1
-        value_weight_t = df_mktval.loc[t-1].query('prc>=1').dropna()[['w']]
-        permnos = value_weight_t.index
+        value_weight_t = df_mktval.loc[t-1].query('prc>=1')[['w']]
+        
+        # get day t log return and convert back to simple return for long short returns 
+        ret_t = np.exp(df_crspm.loc[t].to_frame('ret')) - 1
+        
+        # merge day t return and lagged market value and drop missing
+        ret_w_t = ret_t.merge(value_weight_t, how='inner', on='permno').dropna()
+        permnos = ret_w_t.index
+
         
         # get the earliest possible date used in signals for day t 
         t_0 = t - Nyrs*12 
         
-        # select data from t_0 to t-1 for stocks that have market cap on t-1 
+        # select data from t_0 to t-1 for stocks that have market cap on t-1
+        # and return on t
         df_crspm_t = df_crspm.loc[t_0:t-1, permnos].dropna(how='all', axis=1)
         df_crspm_t_simp = np.exp(df_crspm_t) - 1
         permnos = df_crspm_t.columns
@@ -224,42 +237,18 @@ with Parallel(n_jobs=CPUUsed, verbose=3) as parallel:
         # get non-overlapping quarterly returns as base signals
         df_crspm_t['qtr'] = qtr_ids
         df_base_sig = df_crspm_t.groupby('qtr').sum(min_count=2).sort_index().T
-        
-        # get day t log return and convert back to simple return for long short returns 
-        ret_t = np.exp(df_crspm.loc[t, permnos].to_frame('ret')) - 1
+        # df_base_sig = df_crspm_t
         
         
         # run procedure in parallel to compute expanded signals and their 
         # long-short returns        
         signal_ret_t = parallel(delayed(get_signals_and_returns)(
-            df_base_sig, cols, value_weight_t, ret_t) for cols in sig_combinations)
+            df_base_sig, ret_w_t, combo, Ncomb) for combo in sig_combinations)
         
         # unpack signals in list of lists
         signal_ret_t = [ls for sub_ls in signal_ret_t for ls in sub_ls]
         
-        
-        # compute additional signal returns based on original returns' quaterly moments
-        # we don't compute kurtosis here because it requires at leat 4 values 
-        mask = df_base_sig.isnull()
-        df_crspm_t_simp['qtr'] = qtr_ids
-        temp_std = df_crspm_t_simp.groupby('qtr').std().T
-        temp_std[mask] = np.nan
-        temp_skew = df_crspm_t_simp.groupby('qtr').skew().T
-        temp_skew[mask] = np.nan
-
-        df_base_sig.columns = [f'ret_{q}' for q in df_base_sig.columns]
-        temp_std.columns = [f'std_{q}' for q in temp_std.columns]
-        temp_skew.columns = [f'skew_{q}' for q in temp_skew.columns]
-        
-        addt_signals = ([df_base_sig[[c]].dropna() for c in df_base_sig.columns] +
-                         [temp_std[[c]].dropna() for c in temp_std.columns] +
-                         [temp_skew[[c]].dropna() for c in temp_skew.columns]
-                         )
-        
-        addt_signal_ret = [get_signal_long_short_ret(signals_t, value_weight_t, ret_t) 
-                           for signals_t in addt_signals]
-        
-        signal_ret_t = addt_signal_ret + signal_ret_t
+                
         signal_ret_t = pd.DataFrame(signal_ret_t)
         signal_ret_t['date'] = dates_id_map[t]
         
@@ -267,9 +256,10 @@ with Parallel(n_jobs=CPUUsed, verbose=3) as parallel:
         
 # final clean up
 df_signal_long_short = pd.concat(df_signal_long_short)
-df_signal_long_short = df_signal_long_short.reset_index()
-df_signal_long_short = df_signal_long_short.rename(columns={'ret': 'ret_ew'})
-df_signal_long_short[['ret_ew', 'ret_vw']] = df_signal_long_short[['ret_ew', 'ret_vw']] * 100
+df_signal_long_short['ret_vw'] = df_signal_long_short.eval('long_vw - short_vw') * 100
+df_signal_long_short['ret_ew'] = df_signal_long_short.eval('long_ew - short_ew') * 100
+cols = ['long_ew', 'long_vw', 'short_ew', 'short_vw']
+df_signal_long_short = df_signal_long_short.drop(columns=cols)
 
 # get ids for signals
 df_signal_long_short = df_signal_long_short.rename(columns={'signalid': 'signalname'})
@@ -279,11 +269,19 @@ df_signal_names = df_signal_long_short[['signalid', 'signalname']].drop_duplicat
 cols_order = ['signalid', 'date', 'ret_ew', 'ret_vw', 'nshort', 'nlong',]
 df_signal_long_short = df_signal_long_short.drop(columns=['signalname'])[cols_order]
 
+
+# check number of signals based on each return moment
+df_signal_names['root'] = df_signal_names['signalname'].str.extract(r'(ret|std|skew|kurt)_.+')
+count = df_signal_names.groupby('root')['signalid'].count()
+print(count)
+
+
 #%% save data
 
-df_signal_long_short.to_csv(path_output / 'PastReturnSignalsLongShort.csv.gzip', index=False)
-df_signal_names.to_csv(path_output / 'PastReturnSignalNames.csv.gzip', index=False)
+df_signal_long_short.to_csv(path_output / 'PastReturnSignalsLongShort_v3.csv.gzip', index=False)
+df_signal_names.to_csv(path_output / 'PastReturnSignalNames_v3.csv.gzip', index=False)
 
 
+#%%
 
 

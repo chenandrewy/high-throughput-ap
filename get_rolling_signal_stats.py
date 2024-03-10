@@ -34,7 +34,7 @@ tqdm.monitor_interval = 0
 if cpu_count()>30:
     CPUUsed = 20
 else:
-    CPUUsed = cpu_count()-2
+    CPUUsed = cpu_count()-1
 
 MachineUsed = 1
 
@@ -106,10 +106,12 @@ def get_alpha_tstat(s_id, df_sig, formula, oos_begin_year, oos_end_year):
 #%% load data
 
 # load family strategies data
-signal_family_names = ['ticker_Harvey2017JF_ew.csv', 'ticker_Harvey2017JF_vw.csv', 
-                       'DataMinedLongShortReturnsVW.csv', 'DataMinedLongShortReturnsEW.csv',
-                       'PastReturnSignalsLongShort.csv.gzip',
-                       'RavenPackSignalsLongShort.csv.gzip'
+signal_family_names = [
+    # 'ticker_Harvey2017JF_ew.csv', 'ticker_Harvey2017JF_vw.csv', 
+    'DataMinedLongShortReturnsVW.csv', 'DataMinedLongShortReturnsEW.csv',
+    'PastReturnSignalsLongShort.csv.gzip',
+    'TickerSignalsLongShort.csv.gzip',
+    'RavenPackSignalsLongShort.csv.gzip'
                        ]
 
 signal_dic = {}
@@ -121,15 +123,22 @@ for name in tqdm(signal_family_names):
         df['day'] = 1
         df['date'] = pd.to_datetime(df[['year', 'month', 'day']])
     
-    elif label in ['ticker_Harvey2017JF_ew', 'ticker_Harvey2017JF_vw']: 
-        df['signalid'], _ = pd.factorize(df['signalname'])
-        df['date'] = pd.to_datetime(df['date']) - pd.offsets.MonthBegin() # makes dates to be first of each month
+    # elif label in ['ticker_Harvey2017JF_ew', 'ticker_Harvey2017JF_vw']: 
+    #     df['signalid'], _ = pd.factorize(df['signalname'])
+    #     df['date'] = pd.to_datetime(df['date']) - pd.offsets.MonthBegin() # makes dates to be first of each month
     
-    elif label in ['PastReturnSignalsLongShort', 'RavenPackSignalsLongShort']:
-        df['date'] = pd.to_datetime(df['date']) - pd.offsets.MonthBegin() # makes dates to be first of each month
+    elif label in ['PastReturnSignalsLongShort', 'RavenPackSignalsLongShort',
+                   'TickerSignalsLongShort']:
+        df['date'] = pd.to_datetime(df['date'])
         df['year'] = df['date'].dt.year
+
+        if df['date'].max().day != 1:
+            # makes dates to be first of each month
+            df['date'] = df['date'] - pd.offsets.MonthBegin() 
         
-        # retain signal-periods with at least 2 stocks in the long and short leg, respectively
+        
+        # retain signal-periods with at least 2 stocks in the long and short leg
+        # only relevant for RavenPackSInalsLongShort where this scenario can arise
         df = df.query('nshort>=2 & nlong>=2')
         
         # seperate value-weighted and equal-weighted portolio returns as different datasets
@@ -151,16 +160,16 @@ for name in tqdm(signal_family_names):
 signal_tstats = []
 
 # find last year for each signal family
-last_year_ok = min([df['year'].max() for name, df in signal_dic.items()]) - OOS_N_YEARS
+last_year_ok = min([df['year'].max() for name, df in signal_dic.items()]) + 1 - OOS_N_YEARS
 
 
 # compute alphas and t-stats in parallel
-with Parallel(n_jobs=CPUUsed, verbose=5) as parallel:
+with Parallel(n_jobs=CPUUsed, verbose=3) as parallel:
     for name, df in signal_dic.items():
         
         print(f'Process Started {name}')
         
-        for oos_begin_yr in range(OOS_BEGIN_YEAR_START, last_year_ok):
+        for oos_begin_yr in range(OOS_BEGIN_YEAR_START, last_year_ok+1):
         
             print(f'OOS begin year: {oos_begin_yr}')
             oos_end_yr = oos_begin_yr + OOS_N_YEARS
@@ -168,7 +177,7 @@ with Parallel(n_jobs=CPUUsed, verbose=5) as parallel:
             
             # select that starting from in-sample begin year
             # and keep only signals with enough observations
-            df_use = df.query('@is_begin_yr <= year <= @oos_end_yr').copy()
+            df_use = df.query('@is_begin_yr <= year < @oos_end_yr').dropna()
             if len(df_use)==0:
                 continue
 
@@ -206,3 +215,4 @@ signal_tstats.to_csv(path_output / f'OOS_signal_tstat_OosNyears{OOS_N_YEARS}.csv
 
 print('saved csv to ' + str(path_output))
 
+#%%
