@@ -9,27 +9,17 @@ Created on Thu Jan 18 10:47:38 2024
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import datetime as dt
-from matplotlib.backends.backend_pdf import PdfPages
 import time, re, gc, os
 from tqdm import tqdm
-import wrds
 from pathlib import Path
-from scipy.stats.mstats import winsorize
-import statsmodels.api as sm
-import statsmodels.formula.api as smf
-import pandas_datareader.data as web
 from joblib import Parallel, delayed
 from multiprocessing import Pool, cpu_count
 import warnings
 import pyreadr
-from copy import copy
 from itertools import combinations
-from functools import reduce
+import inspect
 
 
-# %% set up / user input
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 tqdm.pandas()
@@ -40,27 +30,16 @@ if cpu_count()>30:
 else:
     CPUUsed = cpu_count()-1
 
-MachineUsed = 1
-
-if MachineUsed==1: # Chuks 
-    path_input = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/')
-    path_output = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/')
-    path_figs = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Figures/')
-    path_tables = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Tables/')
-elif MachineUsed==2: # Andrew 
-
-    CPUUsed = 8
-
-    # get working directory
-    path_root = Path(os.getcwd() + '/../../')
-
-    path_input = Path(path_root / 'Data/')
-    path_output = Path(path_root / 'Data/')
-    path_figs = Path(path_root / 'Andrew/Figures/')
-    path_tables = Path(path_root / 'Andrew/Tables/')    
 
 
+# Get the directory of the current file
+current_filename = inspect.getframeinfo(inspect.currentframe()).filename
+current_directory = os.path.dirname(current_filename)
+path_root = Path(current_directory + "/../../")
 
+# directory to reading and saving
+path_input = path_root / 'Data/'
+path_output = path_root / 'Data/'
 
 
 #%% define functions for constructing long short portfolios
@@ -184,8 +163,9 @@ df_mktval = df_mktval.set_index(['date', 'permno']).sort_index(level=[0,1])
 #%% compute signals' long-short return for each date in parallel
 
 
+# number of years and quarters used for signal construction
 
-Nyrs = 5
+Nyrs = 5 
 nqtr = 4*Nyrs
 
 # define quarter ids for each month over Nyrs years
@@ -197,7 +177,7 @@ Ncomb = 4
 signal_names =  np.arange(1, nqtr+1)
 sig_combinations = list(combinations(signal_names, Ncomb))
 
-# add additional quarters for up to q 3:
+# add additional quarters for up to q3:
 add_qtrs1 = [(i,) for i in range(1, nqtr+1)]
 add_qtrs2 = [tuple(np.arange(1, q+1)) for q in range(2, 4)]
 
@@ -237,7 +217,6 @@ with Parallel(n_jobs=CPUUsed, verbose=3) as parallel:
         # get non-overlapping quarterly returns as base signals
         df_crspm_t['qtr'] = qtr_ids
         df_base_sig = df_crspm_t.groupby('qtr').sum(min_count=2).sort_index().T
-        # df_base_sig = df_crspm_t
         
         
         # run procedure in parallel to compute expanded signals and their 
@@ -278,8 +257,8 @@ print(count)
 
 #%% save data
 
-df_signal_long_short.to_csv(path_output / 'PastReturnSignalsLongShort_v3.csv.gzip', index=False)
-df_signal_names.to_csv(path_output / 'PastReturnSignalNames_v3.csv.gzip', index=False)
+df_signal_long_short.to_csv(path_output / 'PastReturnSignalsLongShort.csv.gzip', index=False)
+df_signal_names.to_csv(path_output / 'PastReturnSignalNames.csv.gzip', index=False)
 
 
 #%%

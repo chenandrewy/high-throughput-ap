@@ -9,27 +9,17 @@ Created on Tue Jan 23 16:24:31 2024
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import datetime as dt
-from matplotlib.backends.backend_pdf import PdfPages
 import time, re, gc, os
 from tqdm import tqdm
-import wrds
 from pathlib import Path
-from scipy.stats.mstats import winsorize
-import statsmodels.api as sm
-import statsmodels.formula.api as smf
-import pandas_datareader.data as web
 from joblib import Parallel, delayed
 from multiprocessing import Pool, cpu_count
 import warnings
 import pyreadr
-from copy import copy
 from itertools import combinations
-from functools import reduce
+import inspect
 
 
-# %% set up / user input
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 tqdm.pandas()
@@ -40,25 +30,14 @@ if cpu_count()>30:
 else:
     CPUUsed = cpu_count()-1
 
-MachineUsed = 1
+# Get the directory of the current file
+current_filename = inspect.getframeinfo(inspect.currentframe()).filename
+current_directory = os.path.dirname(current_filename)
+path_root = Path(current_directory + "/../../")
 
-if MachineUsed==1: # Chuks 
-    path_input = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/')
-    path_output = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Data/')
-    path_figs = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Figures/')
-    path_tables = Path('C:/users/cdim/Dropbox/ChenDim/Stop-Worrying/Chuks/Tables/')
-elif MachineUsed==2: # Andrew 
-
-    CPUUsed = 8
-
-    # get working directory
-    path_root = Path(os.getcwd() + '/../../')
-
-    path_input = Path(path_root / 'Data/')
-    path_output = Path(path_root / 'Data/')
-    path_figs = Path(path_root / 'Andrew/Figures/')
-    path_tables = Path(path_root / 'Andrew/Tables/')    
-
+# directory to reading and saving
+path_input = path_root / 'Data/'
+path_output = path_root / 'Data/'
 
 
 
@@ -87,127 +66,17 @@ cols_use = ['permno', 'date', 'w', 'prc', 'ret', 'ticker']
 df_crspm = df_crspm[cols_use].reset_index(drop=True)
 
 
-#%% get ticker letters and 
-    
-# def get_ticker_char(ticker):
-    
-#     vowels = "AEIOU"
-#     consonants = "BCDFGHJKLMNPQRSTVWXYZ"
 
+#%% construct ticker strategies
 
-#     n = len(ticker)    
-#     # work with only the first four tickers
-#     # because 5-letter tickers are rare
-#     if n>4: 
-#         n = 4
-    
-#     set_1 = {f'L{i+1}': ticker[i] for i in range(n)}
-    
-#     # get the first consonant and first vowel in ticker if any is missing use
-#     # white space
-#     set_1['L12'] = '##'
-#     if n>=2:
-#         first_vowel = next((c for c in ticker if c in vowels), '#')
-#         first_consonant = next((c for c in ticker if c in consonants), '#')
-#         set_1['L12'] = first_consonant + first_vowel
-#     return set_1 
-    
-
-
-# df_tk = df_crspm.dropna(subset=['ticker']).copy()
-# df_tk = df_tk['ticker'].progress_apply(get_ticker_char)
-# df_tk = pd.DataFrame(df_tk.values.tolist(), index=df_tk.index)
-# tk_names = df_tk.columns
-
-# # merge with returns
-# df_tk = df_tk.join(df_crspm.drop(columns=['ret']))
-
-# # lag tickers and market size
-# df_tk['date'] = df_tk['date'] + pd.DateOffset(months=1)
-# df_tk = df_tk.merge(df_crspm[['permno', 'date', 'ret']], 
-#                     how='inner', on=['permno', 'date'])
-
-# df_tk
-
-
-# #%% Construct base portoflios from ticker letter combinations
-
-# # define number of initial ticker-letter sequence portfolios to work with
-# # Nbase = 250
-
-# # start from 1993 and require prices greater than one dollar
-# # df_tk = df_tk.query('date.dt.year >= 1963 & prc>=1')
-# df_tk = df_tk.query('date.dt.year >= 1963')
-
-# df_tk['nstocks'] = 1
-
-# # loop over ticker letter position names and combination of ticker letter 
-# # positions and construct base potfolios based on all unique letters 
-# df_base_port = []
-
-
-# tk_names = ['L1', 'L2', 'L3', 'L4', 'L12']
-# for tl in tqdm(tk_names):
-#     df = df_tk[[tl, 'date', 'w', 'ret', 'nstocks']].dropna()
-#     # normalize weights by ticker letter group day
-#     df['w'] = df['w']/df.groupby(['date', tl])['w'].transform('sum')
-#     df['ret_vw'] = df.eval('ret * w')
-#     df = df.groupby([tl, 'date']).agg(
-#         {'ret': 'mean', 'ret_vw': 'sum', 'nstocks': 'sum'})
-#     df = df.reset_index().rename(columns={tl: 'signal'})
-#     df['signal'] = f'{tl}_' + df['signal']
-#     df_base_port.append(df)
-
-# df_base_port = pd.concat(df_base_port).set_index(
-#     ['signal', 'date']).sort_index(level=[0,1])
-
-
-# # Select only base portfolio with non-missing values for full sample
-# # and use them as the base portfolio for constructing long-short portfolios
-# df = df_base_port['ret'].unstack(0)
-# temp = df.count()
-# sig_names = temp[temp>=len(df)*0.8].index.sort_values()
-# print('\n')
-# print('# original base portfolios:', len(temp))
-# print('# original base portfolios without missing value:', len(sig_names))
-
-
-# # choose a random sample of Nbase portfolios from all those without missing values
-# # then take combination Nbase choose 2 to be used for constructing long-short portfolios 
-# # np.random.seed(201)
-# # sel_sig_names = np.random.choice(sig_names, Nbase, replace=False)
-# # final_combo = list(combinations(sel_sig_names, 2))
-
-# final_combo = list(combinations(sig_names, 2))
-
-# print('# final long-short portfolios:', f'{len(final_combo):,.0f}')
-
-
-# #%% Now get final long short portfolios using combinations from above
-
-# df_long_short = []
-# cols = ['ret', 'ret_vw']
-# for s1, s2 in tqdm(final_combo):
-#     df = df_base_port.loc[s1, cols] - df_base_port.loc[s2, cols]
-#     df = df.join(df_base_port.loc[s1, 'nstocks'].to_frame('n_long'))
-#     df = df.join(df_base_port.loc[s2, 'nstocks'].to_frame('n_short'))
-#     df['signalname'] = f'{s1}_minus_{s2}'
-#     df_long_short.append(df)
-# df_long_short = pd.concat(df_long_short).reset_index()
-
-# # final cleaning
-# df_long_short = df_long_short.rename(columns={'ret': 'ret_ew'})
-# df_long_short['signalid'], _ = pd.factorize(df_long_short['signalname'])
-# df_signal_names = df_long_short[['signalid', 'signalname']].drop_duplicates(
-#     subset=['signalid'])
-# cols_order = ['signalid', 'date', 'ret_ew', 'ret_vw', 'n_long', 'n_short']
-# df_long_short = df_long_short[cols_order]
-
-
-#%% Alternative approach
-
-
-
+'''
+Idea is to rank stocks based on the first letter of their ticker then split
+the ranked stocks into 20 groups. Then take combination 20 choose 4.
+For each set of four groups, Long the stocks in the first two groups and short
+stocks in the other 2 groups. 
+Repeat for the above process for the second, third and fourth letters of the 
+tickers respectively
+'''
 
 
 def get_combo_portfolio(df_t, t, Ngroups, combos):
