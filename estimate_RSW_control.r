@@ -115,102 +115,107 @@ statspar <- tibble(
     gamma = 0.05,
     alpha = 0.10,
     kstepM_itermax = 100,
-    subsetmax = 1e3
+    subsetmax = 1e3,
+    feedback = TRUE
 )
 
-# tbc: this statspar$kmax can be replaced with a closed form
-# if  the highest k that would be needed
-if (is.null(statspar$kmax)) {
-    statspar$kmax <- statspar$gamma * (nrow(crossdat) + 1)
-}
+do_FDP_stepM <- function(gamma = 0.05, alpha = 0.10, subsetmax = 1e3, kmax = NULL, kstepM_itermax = 100, feedback = FALSE) {
+    # ensures Pr(FDP > gamma) <= alpha
+    # implicitly uses crossdat and bootdat
 
-
-# though perhaps there should be a warning if the closed form implies too many iterations
-
-# repeatedly increase the k in k-FWER
-for (k in seq(1, statspar$kmax, by = statspar$iterstep)) {
-
-    # tbc: add stepwise loop
-
-    # initialize k-StepM
-    disc <- c() # start with empty set
-
-    # repeatedly add more discoveries
-    for (j in 1:statspar$kstepM_itermax) {
-        print(paste0("k = ", k, " j = ", j))
-
-        # define test set (signals not declared discoveries)
-        testme <- setdiff(crossdat$id, disc)
-        
-        # break if infeasible
-        num_subset <- choose(length(disc), k-1)
-        if (num_subset > statspar$subsetmax) {
-            print(paste0("Infeasible: num_subset = ", num_subset, " > ", statspar$subsetmax))
-
-            discdat = list(
-                disc = disc,
-                hurdle = h,
-                jstep = j,
-                break_reason = "num_subset > subsetmax"
-            )
-
-            break
-        }
-
-        # define the set of discovered subsets to check
-        if (is.null(disc) | k == 1) {
-            # if no discoveries or k=1, use empty set
-            disc_sub_list <- list(c())
-        } else {
-            disc_sub_list <- combn(disc, k - 1) %>% t()
-            disc_sub_list <- split(disc_sub_list, row(disc_sub_list))
-        }            
-
-        # loop over subsets
-        h_list <- array(NA, length(disc_sub_list))
-        for (subi in 1:length(disc_sub_list)) {
-            # find hurdle based on testme union a subset of discoveries
-            testme_plus <- c(testme, disc_sub_list[[subi]])
-            t_kmax_dat <- bootdat[id %in% testme_plus & rank == k]
-            h_list[subi] <- quantile(t_kmax_dat$tabs, 1 - statspar$alpha)
-        }
-
-        disc_sub_list
-        is.null(disc)
-        
-        # use the worst case from h_list
-        h <- max(h_list)
-
-        # find new discoveries
-        disc_new <- crossdat[id %in% testme & abs(tstat) > h]$id
-
-        # if no new discoveries, then break
-        if (length(disc_new) == 0) {
-            discdat = list(
-                disc = disc,
-                hurdle = h,
-                jstep = j,
-                break_reason = "no new discoveries"
-            )
-            break
-        }
-
-        # update disc
-        disc <- c(disc, disc_new)
-    
-    }   # end j loop
-
-    stop_cond <- (statspar$gamma < k / (length(disc) + 1))
-    if (stop_cond) {
-        print(paste0("Stopping at k = ", k))
-        print(paste0("gammahat = ", k / (length(disc) + 1)))
-        print(paste0("Num discoveries: ", length(discdat$disc)))
-        print(paste0("hurdle = ", discdat$hurdle))
-        print(paste0("j iter = ", discdat$j))
-        print(paste0("Break condition: ", discdat$break_reason))
-        break
+    # if the highest k that would be needed
+    if (is.null(statspar$kmax)) {
+        statspar$kmax <- statspar$gamma * (nrow(crossdat) + 1)
     }
-} # end k in k-FWER loop
 
+    # do FDP-stepM: repeatedly increase the k in k-FWER
+    for (k in seq(1, statspar$kmax, by = 1)) {
+        # initialize k-StepM
+        disc <- c() # start with empty set
 
+        # do k-stepM: repeatedly add more discoveries
+        for (j in 1:statspar$kstepM_itermax) {
+            if (statspar$feedback) {
+                print(paste0("k = ", k, " j = ", j))
+            }
 
+            # define test set (signals not declared discoveries)
+            testme <- setdiff(crossdat$id, disc)
+
+            # break if infeasible
+            num_subset <- choose(length(disc), k - 1)
+            if (num_subset > statspar$subsetmax) {
+                if (statspar$feedback) {
+                    print(paste0("Infeasible: num_subset = ", num_subset, " > ", statspar$subsetmax))
+                }
+
+                discdat <- list(
+                    disc = disc,
+                    hurdle = h,
+                    jstep = j,
+                    break_reason = "num_subset > subsetmax"
+                )
+
+                break
+            }
+
+            # define the set of discovered subsets to check
+            if (is.null(disc) | k == 1) {
+                # if no discoveries or k=1, use empty set
+                disc_sub_list <- list(c())
+            } else {
+                disc_sub_list <- combn(disc, k - 1) %>% t()
+                disc_sub_list <- split(disc_sub_list, row(disc_sub_list))
+            }
+
+            # loop over subsets
+            h_list <- array(NA, length(disc_sub_list))
+            for (subi in 1:length(disc_sub_list)) {
+                # find hurdle based on testme union a subset of discoveries
+                testme_plus <- c(testme, disc_sub_list[[subi]])
+                t_kmax_dat <- bootdat[id %in% testme_plus & rank == k]
+                h_list[subi] <- quantile(t_kmax_dat$tabs, 1 - statspar$alpha)
+            }
+
+            disc_sub_list
+            is.null(disc)
+
+            # use the worst case from h_list
+            h <- max(h_list)
+
+            # find new discoveries
+            disc_new <- crossdat[id %in% testme & abs(tstat) > h]$id
+
+            # if no new discoveries, then break
+            if (length(disc_new) == 0) {
+                discdat <- list(
+                    disc = disc,
+                    hurdle = h,
+                    jstep = j,
+                    break_reason = "no new discoveries"
+                )
+                break
+            }
+
+            # update disc
+            disc <- c(disc, disc_new)
+        } # end j loop
+
+        stop_cond <- (statspar$gamma < k / (length(disc) + 1))
+        if (stop_cond) {
+            if (statspar$feedback) {
+                print(paste0("Stopping at k = ", k))
+                print(paste0("gammahat = ", k / (length(disc) + 1)))
+                print(paste0("Num discoveries: ", length(discdat$disc)))
+                print(paste0("hurdle = ", discdat$hurdle))
+                print(paste0("j iter = ", discdat$j))
+                print(paste0("Break condition: ", discdat$break_reason))
+                break
+            }
+        }
+    } # end k in k-FWER loop
+
+    return(discdat)
+} # end function do_FDP_stepM
+
+do_FDP_stepM(feedback = FALSE)
