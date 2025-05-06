@@ -1,21 +1,76 @@
 # 2024 09 estimation of Romano-Shaikh-Wolf 2008 Econometric Theory FDP's FDP-StepM
-# Same algo found in Chordia-Goyal-Saretto (2020); Harvey-Liu-Saretto (2020)
+# (Mostly) same algo found in Chordia-Goyal-Saretto (2020); Harvey-Liu-Saretto (2020)
+
+# time required depends a lot on the size of tstats in the data
+# VW returns => small tstats => 
 
 # Environment ========================================================
 rm(list = ls())
+tic0 = Sys.time()
 
 ## Packages ====
 library(tidyverse)
 library(data.table)
 library(optparse)
 library(foreach)
-library(doParallel)
 
+## Option Parsing  ========================================================
 
-library(matrixStats)
-library(future.apply)
-library(fst)
-library(future.apply)
+# command line options
+cmd_option_list <- list(
+    make_option(c("--data_path"),
+        type = "character", default = "../../Data/"
+    ),    
+    make_option(c("--signal_data"),
+        type = "character", default = "pastret",
+        help = c("acct, pastret, or ticker")
+    ),
+    make_option(c("--stock_weight"),
+        type = "character", default = "vw",
+        help = c("ew or vw")
+    ),
+    make_option(c("--out_path"),
+        type = "character", default = "../../Data/RSW_result/",
+    ),
+    make_option(c("--out_prefix"),
+        type = "character", default = "DebugRSW_",
+    ),
+    make_option(c("--sampstart"),
+        type = "integer", default = 196301
+    ),
+    make_option(c("--sampend"),
+        type = "integer", default = 198312
+    ),
+    make_option(c("--min_nmonth"),
+        type = "integer", default = 60,
+        help = "Drop signals with less than min_nmonth months of data"
+    ),
+    make_option(c("--nboot"),
+        type = "integer", default = 2000,
+        help = "Number of bootstraps"
+    ),
+    make_option(c("--alpha"),
+        type = "numeric", default = 0.10,
+        help = "P(FDP>gamma)<alpha"
+    ),
+    make_option(c("--gamma"),
+        type = "numeric", default = 0.05,
+        help = "P(FDP>gamma)<alpha"
+    ),
+    make_option(c("--kstepM_itermax"),
+        type = "integer", default = 100,
+        help = "Max number of iterations for k-stepM"
+    ),
+    make_option(c("--subsetmax"),
+        type = "integer", default = 100, # honestly setting this above 10 doesn't change anything
+        help = "Max number of subsets for k-stepM"
+    )
+)
+opt <- OptionParser(option_list = cmd_option_list) %>% parse_args()
+
+# hard coded
+nbootchunk = 1000
+
 
 ## Functions ========================================================
 
@@ -52,67 +107,13 @@ lsos <- function(..., n=10) {
     .ls.objects(..., order.by="Size (MB)", decreasing=TRUE, head=TRUE, n=n)
 }
 
-# panel bootstrap (not used)
-bootstrap_slow <- function(retdat, nboot) {
-
-    # create matrix for bootstrap
-    rmat <- retdat %>%
-        spread(key = yearm, value = ret)
-    rownames(rmat) <- rmat$signalid
-    rmat <- as.matrix(rmat[, -1])
-
-    # cross-sectional summary
-    crossdat <- data.table(
-        id = rownames(rmat),
-        nmonth = rowSums(!is.na(rmat)),
-        rbar = rowMeans(rmat, na.rm = TRUE),
-        vol = sqrt(rowMeans(rmat^2, na.rm = TRUE))
-    ) %>%
-        mutate(tstat = rbar / vol * sqrt(nmonth))
-            
-    N <- nrow(rmat)
-    T <- ncol(rmat)
-
-    emat <- rmat - matrix(crossdat$rbar, N, T, byrow = FALSE)
-
-    bootdat <- foreach(simi = 1:nboot, .combine = "rbind", .packages = "tidyverse") %do% {
-
-        # feedback
-        if (simi %% 100 == 0) print(paste0("bootstrap panel: ", simi, " of ", nboot))
-
-        yearmboot <- sample(1:T, T, replace = TRUE)
-        emat_cur <- emat[, yearmboot]
-        ebar_cur <- rowMeans(emat_cur, na.rm = TRUE)
-        nmonth_cur <- rowSums(!is.na(emat_cur))
-
-        dat_cur <- data.table(
-            simi = simi,
-            id = rownames(rmat),
-            t_orig = crossdat$tstat,
-            tstat = ebar_cur / sqrt(rowMeans(emat_cur^2, na.rm = TRUE)) * sqrt(nmonth_cur),
-            ebar = ebar_cur
-        ) %>%
-            setDT()
-
-        return(dat_cur)
-    } # end foreach simi
-
-    # arrange nicely
-    bootdat[, tabs := abs(tstat)]
-    setorder(bootdat, simi, -tabs)
-    bootdat[, rank := 1:.N, by = simi]
-
-    return(bootdat)
-} # end function bootstrap_panel
-
 bootstrap_chunk = function(retdat, nbootchunk) {
     # fast bootstrap for a single chunk (courtesey of o3)
     # (but painfully hand-checked by andrew)
 
     # create matrix for bootstrap
-    rmat <- retdat %>%
-        spread(key = yearm, value = ret)
-    rownames(rmat) <- rmat$signalid
+    rmat <- retdat[ ,.(id, yearm, ret)] %>% spread(key = yearm, value = ret)
+    rownames(rmat) <- rmat$id
     rmat <- as.matrix(rmat[, -1])
 
     # cross-sectional summary
@@ -192,14 +193,15 @@ bootstrap_fast = function(retdat, nboot, nbootchunk = 1000){
     nchunk = ceiling(nboot / nbootchunk)
     bootdat = foreach(i = 1:nchunk, .combine = "rbind", .packages = "tidyverse") %do% {
         print(paste0("bootstrap chunk: ", i, " of ", nchunk))
-        bootstrap_chunk(retdat, nbootchunk) %>%
-            mutate(chunk = i)
+        chunkdat = bootstrap_chunk(retdat, nbootchunk)
+        chunkdat[, chunk := i]
+        chunkdat[, .(chunk, simi, id, tabs)]
     }
 
     # renumber the bootstraps
     bootdat[ , booti := simi + (chunk - 1) * nbootchunk]
     bootdat[ , c('simi', 'chunk') := NULL]
-    setcolorder(bootdat, c('booti', 'id', 't_orig', 'tstat', 'ebar', 'tabs', 'rank'))
+    setcolorder(bootdat, c('booti', 'id', 'tabs'))
 
     # keep only the first nboot bootstraps
     bootdat = bootdat[booti <= nboot]
@@ -207,183 +209,190 @@ bootstrap_fast = function(retdat, nboot, nbootchunk = 1000){
     return(bootdat)
 } # end bootstrap_fast
 
-# Option Parsing / User Entry ========================================================
-
-# command line options
-cmd_option_list <- list(
-    make_option(c("-r", "--panel_name"),
-        type = "character", default = "DataMinedLongShortReturnsVW.csv",
-        help = "Filename of signal-month returns"
-    ),
-    make_option(c("-o", "--out_prefix"),
-        type = "character", default = "DebugRSW_",
-        help = "Output prefix for saved files"
-    ),
-    make_option(c("-d", "--data_path"),
-        type = "character", default = "../../Data/",
-        help = "Path to data directory"
-    )
-)
-cmd_opt <- OptionParser(option_list = cmd_option_list) %>% parse_args()
 
 # Create retdat: df of returns used to find good signals ===========================
-sampstart <- 196301
-sampend <- sampstart + 2000 + 11
-min_nmonth <- 12 * 5
 
-retdat <- fread(paste0(cmd_opt$data_path, cmd_opt$panel_name))
+if (opt$signal_data == "acct") {
+    # acct data has a different format
+    retfile = paste0('DataMinedLongShortReturns', toupper(opt$stock_weight), '.csv')
+    retdat <- fread(paste0(opt$data_path, retfile))
+} else {
+    
+    # pastret and ticker data have the same format
+    if (opt$signal_data == "pastret") {
+        retfile = 'PastReturnSignalsLongShort.csv.gzip'
+    } else if (opt$signal_data == "ticker") {
+        retfile = 'TickerSignalsLongShort.csv.gzip'
+    }
+    retdat <- fread(paste0(opt$data_path, retfile))
+
+    # select stock weight
+    if (opt$stock_weight == "ew") {
+        setnames(retdat, 'ret_ew', 'ret')
+    } else if (opt$stock_weight == "vw") {
+        setnames(retdat, 'ret_vw', 'ret')
+    }
+
+    # match acct data format
+    retdat[ , ':='(year = year(date), month = month(date))]
+} # end if signal_data
+
 retdat <- retdat %>% transmute(signalid, yearm = year * 100 + month, ret) %>% 
-    filter(yearm >= sampstart & yearm <= sampend)
+    filter(yearm >= opt$sampstart & yearm <= opt$sampend)
 signalkeep <- retdat[ , .(nmonth = .N), by = signalid] %>%
-    mutate(keep = nmonth >= min_nmonth)
+    mutate(keep = nmonth >= opt$min_nmonth)
 retdat <- retdat[signalid %in% signalkeep[keep == TRUE]$signalid]
 
+# construct crossdat and rename id to match ranking ================================
+# id is a new signal id that is the rank of the signal based on tstat
+crossdat = retdat[, .(
+    nmonth = sum(!is.na(ret)), 
+    rbar = mean(ret, na.rm = TRUE), 
+    vol = sd(ret, na.rm = TRUE)
+    ), by = signalid
+] %>% 
+mutate(tstat = rbar / vol * sqrt(nmonth),
+    tabs = abs(tstat)) %>% 
+    arrange(-tabs) %>% 
+    transmute(signalid, id = 1:n(), tabs, tstat, nmonth, rbar, vol)
+
+# merge on id
+retdat[crossdat, on = .(signalid), id := i.id]
+setcolorder(retdat, c('id','yearm','ret','signalid'))
+
 # Run Bootstrap =================================================
-nboot = 10000
-# 2 minutes for 10,000 bootstraps => 8 hours for 40 x 6 
-
-tic <- Sys.time()
-bootdat = bootstrap_fast(retdat, nboot = nboot, nbootchunk = 1000)
+tic <- Sys.time()   
+bootdat = bootstrap_fast(retdat, nboot = opt$nboot, nbootchunk = nbootchunk)
 toc <- Sys.time()
-print(paste0("min to bootstrap: ", round(difftime(toc, tic, units = "mins"), 2), " nboot = ", nboot))
-
-# construct crossdat
-crossdat = bootdat[booti == 1] %>% 
-    transmute(id, tstat = t_orig)
+print(paste0("min to bootstrap: ", round(difftime(toc, tic, units = "mins"), 2), " nboot = ", opt$nboot))
 
 # Do the RSW thing =========================
 
-# if num_subset = 1700, this can take a very long time, > 10 minutes for just one j step
-
-statspar <- tibble(
-    kmax = NULL,
-    iterstep = 1,
-    gamma = 0.05,
-    alpha = 0.10,
-    kstepM_itermax = 100,
-    subsetmax = 1e4,
-    feedback = TRUE
-)
-
-# ensures Pr(FDP > gamma) <= alpha
-# implicitly uses crossdat and bootdat
-
-# kmax = null, find the highest k that would be needed
-if (is.null(statspar$kmax)) {
-    statspar$kmax <- floor(statspar$gamma * (nrow(crossdat) + 1)) + 1
-}
+# maximum k needed
+    # PFDP control comes from achieving kFWER control and 
+    # finding k st k > gamma * num_discoveries
+    # So the largest k needed is if every signal is a discovery
+kmax = floor(opt$gamma * (nrow(crossdat) + 1)) + 1 
 
 # do FDP-stepM: repeatedly increase the k in k-FWER
 tic = Sys.time()
-for (k in seq(1, statspar$kmax, by = 1)) {
-    # initialize k-StepM
-    disc <- c() # start with empty set (aka R_j)
+setorder(bootdat, booti, -tabs) # sort bootdat
+for (k in seq(1, kmax, by = 1)) {
+
+    # initialize k-StepM        
+    disc_id = c() # no discoveries yet    
 
     # do k-stepM: repeatedly add more discoveries
-    for (j in 1:statspar$kstepM_itermax) {
+    for (j in 1:opt$kstepM_itermax) {        
 
+        # create test set bootstrap
+        testboot = bootdat[!id %in% disc_id]
 
-        if ((j > 1) && (k > 1)) browser()         # debug
+        if ((j == 1) | (k==1)) {
+            # RW2007 Alg 2.1 Step j = 1
 
-        # define test set (signals not declared discoveries, aka A_j)
-        testme <- setdiff(crossdat$id, disc)
-
-
-        ## check feasibility
-        #   for length(disc) = 60, k = 3, the number of subsets to check is 1700
-        #   and is not very feasible.
-        #   so to be feasible, if k >= 3, we will typically need to stop at j = 1
-        num_subset <- choose(length(disc), k - 1)
-
-        # feedback
-        if (statspar$feedback) {
-            print(paste0("k = ", k,
-                ", j = ", j,
-                ", num_subset = ", num_subset))
-        }
-
-        # break if infeasible
-        if (num_subset > statspar$subsetmax) {
-            if (statspar$feedback) {
-                print(paste0("Infeasible: num_subset = ", num_subset, " > ", statspar$subsetmax))
-            }
-
-            discdat <- list(
-                disc = disc,
-                hurdle = h,
-                jstep = j,
-                break_reason = "num_subset > subsetmax"
-            )
-            break
-        }
-
-        # define the set of discovered subsets to check
-        if (is.null(disc) | k == 1) {
-            # if no discoveries or k=1, use empty set
-            disc_sub_list <- list(c())
+            # find critical value based on ids in test set
+            kmaxboot = testboot[ , .SD[k], by = booti] 
+            h = quantile(kmaxboot$tabs, 1 - opt$alpha)         
+            
         } else {
-            disc_sub_list <- combn(disc, k - 1) %>% t()
-            disc_sub_list <- split(disc_sub_list, row(disc_sub_list))
-        }
+            # RW2007 Alg 2.1 Step j > 1
 
-        # loop over subsets
-        h_list <- array(NA, length(disc_sub_list))
-        tic = Sys.time()
-        for (subi in 1:length(disc_sub_list)) {
-            # find hurdle based on testme union a subset of discoveries
-            testme_plus <- c(testme, disc_sub_list[[subi]]) # K = A_j union I
-            t_kmax_dat <- bootdat[id %in% testme_plus & rank == k]  # k-max(T_{n,i}: i \in K)
-            h_list[subi] <- quantile(t_kmax_dat$tabs, 1 - statspar$alpha) # hat{c}_{n,K}(1-alpha,K)
-        }
-        toc = Sys.time()
-        print(paste0("min to find h: ", round(difftime(toc, tic, units = "mins"), 2)))
+            # check feasibility
+            num_subsets = choose(length(disc_id), k-1)
+            if (num_subsets > opt$subsetmax) {
+                print(paste0('num_subsets = ', num_subsets, ' > subsetmax = ', opt$subsetmax, ' going to next k'))
+                break
+            }        
 
-        bootdat_kmax = bootdat[rank == k] # pre-compute the k-largest tstat in each bootstrap
+            # find new hurdle
+            disc_id_subsets = combn(disc_id, k-1)
+            hlist = numeric(num_subsets)*NA
+            for (subi in 1:num_subsets) {
+                # find hurdle from an augmented test set (\hat{c}_{n,K} for K = A_j \cup I)
+                # this loop is infuriating because it's slow and essentially every single subi
+                # produces the same hurdle (see below)
+                
+                disc_id_subset = disc_id_subsets[ , subi] # I
+                temp = testboot %>% rbind(bootdat[id %in% disc_id_subset]) # K = A_j \cup I
+                setorder(temp, booti, -tabs)
+                kmaxboot = temp[ , .SD[k], by = booti]
 
+                # find critical value based on ids in test set
+                hlist[subi] = quantile(kmaxboot$tabs, 1 - opt$alpha) # \hat{c}_{n,K}
 
-        # use the worst case from h_list
-        h <- max(h_list)
+                print(paste0('subi = ', subi, ' h = ', round(hlist[subi], 2), ' of ', num_subsets))
 
-        # find new discoveries
-        disc_new <- crossdat[id %in% testme & abs(tstat) > h]$id
+                # compare with unaugmented (almost always the same)
+                # kmaxboot_unaug = testboot[ , .SD[k], by = booti]
+                # h_unaug = quantile(kmaxboot_unaug$tabs, 1 - opt$alpha)
+                # print(paste0('unaug h = ', h_unaug))
+            } # end for subi
 
-        if (statspar$feedback) {
-            print(paste0(
-                "  worst case h = ", round(h, 2),
-                ", j loop new discoveries = ", length(disc_new)
-            ))
+            h = max(hlist) # \hat{d}_{n,A_j}         
+
+        } # end if j > 1
+
+        # declare new discoveries based on critical value 
+        disc_id_new = setdiff(crossdat[tabs > h]$id, disc_id)             
+
+        # if no new discoveries, go to next k
+        if (length(disc_id_new) == 0) {
+            break
         }        
 
-        # if no new discoveries, then break
-        if (length(disc_new) == 0) {
-            discdat <- list(
-                disc = disc,
-                hurdle = h,
-                jstep = j,
-                break_reason = "no new discoveries"
-            )
-            break
-        }
+        # update discoveries
+        disc_id = c(disc_id, disc_id_new)
 
-        # update disc
-        disc <- c(disc, disc_new)
+        print(paste0("k = ", k, ", j = ", j, ", h = ", round(h, 2), ", num_disc = ", length(disc_id)))
+
     } # end j loop
 
-    stop_cond <- k / (length(disc) + 1) > statspar$gamma
+    stop_cond <- k / (length(disc_id) + 1) > opt$gamma
+    print(paste0("FDPhat = ", round(k / (length(disc_id) + 1), 3)))
     if (stop_cond) {
-        if (statspar$feedback) {
-            print(paste0("Stopping at k = ", k))
-            print(paste0("gammahat = ", k / (length(disc) + 1)))
-            print(paste0("Num discoveries: ", length(discdat$disc)))
-            print(paste0("hurdle = ", discdat$hurdle))
-            print(paste0("j iter = ", discdat$j))
-            print(paste0("j break condition: ", discdat$break_reason))
-            break
-        }
+        print(paste0("Stopping at k = ", k))
+        print(paste0("gammahat = ", round(k / (length(disc_id) + 1), 2)))
+        print(paste0("Num discoveries: ", length(disc_id)))
+        print(paste0("hurdle = ", round(h, 2)))
+        print(paste0("j iter = ", j))
+        print(paste0("j break condition: ", stop_cond))
+
+        break
     }
 } # end k in k-FWER loop
 
 toc = Sys.time()
 print(paste0("min to FDP-stepM: ", round(difftime(toc, tic, units = "mins"), 2)))
 
-discdat
+# Assemble and save results ========================================================
+
+RSW_result = tibble(
+    panel_name = opt$panel_name,
+    sampstart = opt$sampstart,
+    sampend = opt$sampend,
+    h = h,
+    alpha = opt$alpha,
+    gamma = opt$gamma,
+    k_last = k,
+    j_last = j,
+    num_disc = length(disc_id)
+)
+
+# create outpath if it doesn't exist
+if (!dir.exists(opt$out_path)) {
+    dir.create(opt$out_path)
+}
+
+outname = paste0(opt$out_path, opt$out_prefix, 
+    opt$signal_data, "_", 
+    opt$stock_weight, "_", 
+    opt$sampstart, "_", opt$sampend, "_", 
+    ".csv") %>% 
+    print()
+
+fwrite(RSW_result, outname)
+
+toc0 = Sys.time()
+print(paste0("min for estimate_RSW_control: ", round(difftime(toc0, tic0, units = "mins"), 2)))
+outname
