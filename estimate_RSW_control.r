@@ -2,9 +2,9 @@
 # (Mostly) same algo found in Chordia-Goyal-Saretto (2020); Harvey-Liu-Saretto (2020)
 
 # to run:
-#   Rscript estimate_RSW_control.r --data_path "../../Data/" --signal_data "pastret" --stock_weight "vw" --sampstart 196301 --sampend 198312 --min_nmonth 60 --nboot 2000 --alpha 0.10 --gamma 0.05 --kstepM_itermax 100 --subsetmax 100
+#   Rscript estimate_RSW_control.r --data_path "../../Data/" --signal_data "ticker" --stock_weight "ew" --sampstart 196301 --sampend 198312 --min_nmonth 60 --nboot 2000 --alpha 0.10 --gamma 0.05 --kstepM_itermax 200 --subsetmax 100 --bisect_itermax 200
 
-# time required may have fat tails
+# must runs take 60 seconds, but time required may have fat tails
 #   entering the ridiculous "check all subsets" loop adds a ton of time (and little information)
 #   so should consider --subsetmax 20 as a starting point
 
@@ -27,7 +27,7 @@ cmd_option_list <- list(
         type = "character", default = "../../Data/"
     ),    
     make_option(c("--signal_data"),
-        type = "character", default = "pastret",
+        type = "character", default = "ticker",
         help = c("acct, pastret, or ticker")
     ),
     make_option(c("--stock_weight"),
@@ -69,6 +69,10 @@ cmd_option_list <- list(
     make_option(c("--subsetmax"),
         type = "integer", default = 100, # honestly setting this above 10 doesn't change anything
         help = "Max number of subsets for k-stepM"
+    ),
+    make_option(c("--bisect_itermax"),
+        type = "integer", default = 200,
+        help = "Max number of iterations for bisection"
     )
 )
 opt <- OptionParser(option_list = cmd_option_list) %>% parse_args()
@@ -191,13 +195,15 @@ bootstrap_chunk = function(retdat, nbootchunk) {
     return(bootdat)
 }
 
-bootstrap_fast = function(retdat, nboot, nbootchunk = 1000){
+bootstrap_fast = function(retdat, nboot, nbootchunk = 1000, seed = 1206){
     # runs bootstrap_chunk many times and combines the results
+
+    set.seed(seed)
     
     # run bootstrap_chunk nchunk times
     nchunk = ceiling(nboot / nbootchunk)
     bootdat = foreach(i = 1:nchunk, .combine = "rbind", .packages = "tidyverse") %do% {
-        print(paste0("bootstrap chunk: ", i, " of ", nchunk))
+        print(sprintf("bootstrap chunk: %d of %d", i, nchunk))
         chunkdat = bootstrap_chunk(retdat, nbootchunk)
         chunkdat[, chunk := i]
         chunkdat[, .(chunk, simi, id, tabs)]
@@ -239,12 +245,18 @@ run_kstepM = function(k, alpha, subsetmax, kstepM_itermax) {
             # check feasibility
             num_subsets = choose(length(disc_id), k-1)
             if (num_subsets > subsetmax) {
-                print(paste0('num_subsets = ', num_subsets, ' > subsetmax = ', subsetmax, ' going to next k'))
+                print(sprintf('num_subsets = %.2e > subsetmax = %d, stopping k-stepM', num_subsets, subsetmax))
                 break
-            }        
+            } else if ((k-1) > length(disc_id)) {
+                # strange case not mentioned in RW 2007 (?)
+                # only occurs if j > 1, so we can still control kFWER
+                print(sprintf('k-1 = %d > length(disc_id) = %d, stopping k-stepM', k-1, length(disc_id)))
+                break
+            }
 
             # find hurdle
             disc_id_subsets = combn(disc_id, k-1)
+
             hlist = numeric(num_subsets)*NA
             for (subi in 1:num_subsets) {
                 # find hurdle from an augmented test set (\hat{c}_{n,K} for K = A_j \cup I)
@@ -259,7 +271,7 @@ run_kstepM = function(k, alpha, subsetmax, kstepM_itermax) {
                 # find critical value based on ids in test set
                 hlist[subi] = quantile(kmaxboot$tabs, 1 - alpha) # \hat{c}_{n,K}
 
-                print(paste0('subi = ', subi, ' h = ', round(hlist[subi], 2), ' of ', num_subsets))
+                print(sprintf('subi = %d, h = %.2f of %d', subi, hlist[subi], num_subsets))
 
                 # compare with unaugmented (almost always the same)
                 # kmaxboot_unaug = testboot[ , .SD[k], by = booti]
@@ -282,14 +294,15 @@ run_kstepM = function(k, alpha, subsetmax, kstepM_itermax) {
         # update discoveries
         disc_id = c(disc_id, disc_id_new)
 
-        print(paste0("k = ", k, ", j = ", j, ", h = ", round(h, 2), ", num_disc = ", length(disc_id)))
+        print(sprintf("k = %d, j = %d, h = %.2f, num_disc = %d, gammaplus = %.3f", k, j, h, length(disc_id), k / (length(disc_id) + 1)))
 
     } # end j loop
 
     kstepMout = tibble(
         h = h, 
         num_disc = length(disc_id),
-        j_last = j
+        j_last = j,
+        gammaplus = k / (num_disc + 1)
     )
 
     return(kstepMout)
@@ -350,7 +363,7 @@ setcolorder(retdat, c('id','yearm','ret','signalid'))
 tic <- Sys.time()   
 bootdat = bootstrap_fast(retdat, nboot = opt$nboot, nbootchunk = nbootchunk)
 toc <- Sys.time()
-print(paste0("min to bootstrap: ", round(difftime(toc, tic, units = "mins"), 2), " nboot = ", opt$nboot))
+print(sprintf("min to bootstrap: %.2f, nboot = %d", difftime(toc, tic, units = "mins"), opt$nboot))
 
 # Do the RSW thing =========================
 
@@ -360,33 +373,67 @@ print(paste0("min to bootstrap: ", round(difftime(toc, tic, units = "mins"), 2),
     # So the largest k needed is if every signal is a discovery
 kmax = floor(opt$gamma * (nrow(crossdat) + 1)) + 1 
 
-# do FDP-stepM: repeatedly increase the k in k-FWER
+# do a bisection version of FDP-stepM: 
+#   find the largest k such that k / (num_disc + 1) <= gamma
 tic = Sys.time()
 setorder(bootdat, booti, -tabs) # sort bootdat
-for (k in seq(1, kmax, by = 1)) {
 
-    # run k-stepM function
-    kstepMout = run_kstepM(k, opt$alpha, opt$subsetmax, opt$kstepM_itermax)
-    h = kstepMout$h
-    j = kstepMout$j_last
-    num_disc = kstepMout$num_disc    
+# interval check
+klo = 1
+khi = floor(opt$gamma * (nrow(crossdat) + 1)) + 1 
+outlo = run_kstepM(klo, opt$alpha, opt$subsetmax, opt$kstepM_itermax)
+outhi = run_kstepM(khi, opt$alpha, opt$subsetmax, opt$kstepM_itermax)
 
-    stop_cond <- k / (num_disc + 1) > opt$gamma
-    print(paste0("FDPhat = ", round(k / (num_disc + 1), 3)))
-    if (stop_cond) {
-        print(paste0("Stopping at k = ", k))
-        print(paste0("gammahat = ", round(k / (num_disc + 1), 2)))
-        print(paste0("Num discoveries: ", num_disc))
-        print(paste0("hurdle = ", round(h, 2)))
-        print(paste0("j iter = ", j))
-        print(paste0("j break condition: ", stop_cond))
+if (outlo$gammaplus > opt$gamma) {
 
-        break
-    }
-} # end k in k-FWER loop
+    # if outlo$gammaplus > opt$gamma, set h to the max tstat, and declare no discoveries
+    result = tibble(
+        h = max(crossdat$tabs) + 1,
+        num_disc = 0,
+        j_last = NA_integer_,
+        gammaplus = NA_real_,
+        k_last = NA_integer_
+    )
+
+} else if (outhi$gammaplus < opt$gamma) {
+    # if outhi$gammaplus < opt$gamma, then no need to bisect, use the resulting h
+    result = outhi %>% mutate(k_last = khi)
+} else {
+    # here we have a bracket, so we bisect
+    for (iter in 1:opt$bisect_itermax) {
+
+        # evaluate the midpoint
+        # bias toward higher k => higher floor on FDP
+        kmid = floor((klo + khi) / 2) + 1
+
+        # stop if kmid == khi
+        if (kmid == khi) {
+            print(sprintf('optimal k found: k = %d', kmid))
+            result = outhi %>% mutate(k_last = kmid)
+            break
+        }
+
+        # check midpoint        
+        outmid = run_kstepM(kmid, opt$alpha, opt$subsetmax, opt$kstepM_itermax)
+
+        # update bracket
+        if (outmid$gammaplus > opt$gamma) {
+            # gammaplus too high => lower k
+            khi = kmid
+            outhi = outmid # bias toward higher k
+        } else {
+            # gammaplus too low => raise k
+            klo = kmid
+        }
+
+        print(sprintf('bisecting: iter = %d, kmid = %d, gammaplus = %.3f', iter, kmid, outmid$gammaplus))
+    } # end for iter
+
+} # end if we have a bracket
 
 toc = Sys.time()
-print(paste0("min to FDP-stepM: ", round(difftime(toc, tic, units = "mins"), 2)))
+print(sprintf("min to FDP-stepM: %.2f", difftime(toc, tic, units = "mins")))
+
 
 # Assemble and save results ========================================================
 
@@ -394,12 +441,13 @@ RSW_result = tibble(
     panel_name = opt$panel_name,
     sampstart = opt$sampstart,
     sampend = opt$sampend,
-    h = h,
+    h = result$h,
     alpha = opt$alpha,
     gamma = opt$gamma,
-    k_last = k,
-    j_last = j,
-    num_disc = num_disc
+    k_last = result$k_last,
+    j_last = result$j_last,
+    num_disc = result$num_disc,
+    gammaplus = result$gammaplus
 )
 
 # create outpath if it doesn't exist
@@ -407,15 +455,14 @@ if (!dir.exists(opt$out_path)) {
     dir.create(opt$out_path)
 }
 
-outname = paste0(opt$out_path, opt$out_prefix, 
-    opt$signal_data, "_", 
-    opt$stock_weight, "_", 
-    opt$sampstart, "_", opt$sampend, "_", 
-    ".csv") %>% 
-    print()
+outname = sprintf("%s%s%s_%s_%d_%d_.csv",
+    opt$out_path, opt$out_prefix,
+    opt$signal_data, opt$stock_weight,
+    opt$sampstart, opt$sampend)
+print(sprintf('writing to %s', outname))
 
 fwrite(RSW_result, outname)
 
 toc0 = Sys.time()
-print(paste0("min for estimate_RSW_control: ", round(difftime(toc0, tic0, units = "mins"), 2)))
+print(sprintf("min for estimate_RSW_control: %.2f", difftime(toc0, tic0, units = "mins")))
 outname
