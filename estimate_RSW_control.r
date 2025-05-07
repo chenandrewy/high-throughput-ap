@@ -1,8 +1,13 @@
 # 2024 09 estimation of Romano-Shaikh-Wolf 2008 Econometric Theory FDP's FDP-StepM
 # (Mostly) same algo found in Chordia-Goyal-Saretto (2020); Harvey-Liu-Saretto (2020)
 
-# time required depends a lot on the size of tstats in the data
-# VW returns => small tstats => 
+# to run:
+#   Rscript estimate_RSW_control.r --data_path "../../Data/" --signal_data "pastret" --stock_weight "vw" --sampstart 196301 --sampend 198312 --min_nmonth 60 --nboot 2000 --alpha 0.10 --gamma 0.05 --kstepM_itermax 100 --subsetmax 100
+
+# time required may have fat tails
+#   entering the ridiculous "check all subsets" loop adds a ton of time (and little information)
+#   so should consider --subsetmax 20 as a starting point
+
 
 # Environment ========================================================
 rm(list = ls())
@@ -209,6 +214,87 @@ bootstrap_fast = function(retdat, nboot, nbootchunk = 1000){
     return(bootdat)
 } # end bootstrap_fast
 
+run_kstepM = function(k, alpha, subsetmax, kstepM_itermax) {
+    # implicitly takes bootdat as input
+
+    # initialize k-StepM        
+    disc_id = c() # no discoveries yet    
+
+    # do k-stepM: repeatedly add more discoveries
+    for (j in 1:kstepM_itermax) {        
+
+        # create test set bootstrap
+        testboot = bootdat[!id %in% disc_id]
+
+        if ((j == 1) | (k==1)) {
+            # RW2007 Alg 2.1 Step j = 1
+
+            # find hurdle
+            kmaxboot = testboot[ , .SD[k], by = booti] 
+            h = quantile(kmaxboot$tabs, 1 - alpha)         
+            
+        } else {
+            # RW2007 Alg 2.1 Step j > 1 (and implicitly k > 1)
+
+            # check feasibility
+            num_subsets = choose(length(disc_id), k-1)
+            if (num_subsets > subsetmax) {
+                print(paste0('num_subsets = ', num_subsets, ' > subsetmax = ', subsetmax, ' going to next k'))
+                break
+            }        
+
+            # find hurdle
+            disc_id_subsets = combn(disc_id, k-1)
+            hlist = numeric(num_subsets)*NA
+            for (subi in 1:num_subsets) {
+                # find hurdle from an augmented test set (\hat{c}_{n,K} for K = A_j \cup I)
+                # this loop is infuriating because it's slow and essentially every single subi
+                # produces the same hurdle (see below)
+                
+                disc_id_subset = disc_id_subsets[ , subi] # I
+                temp = testboot %>% rbind(bootdat[id %in% disc_id_subset]) # K = A_j \cup I
+                setorder(temp, booti, -tabs)
+                kmaxboot = temp[ , .SD[k], by = booti]
+
+                # find critical value based on ids in test set
+                hlist[subi] = quantile(kmaxboot$tabs, 1 - alpha) # \hat{c}_{n,K}
+
+                print(paste0('subi = ', subi, ' h = ', round(hlist[subi], 2), ' of ', num_subsets))
+
+                # compare with unaugmented (almost always the same)
+                # kmaxboot_unaug = testboot[ , .SD[k], by = booti]
+                # h_unaug = quantile(kmaxboot_unaug$tabs, 1 - alpha)
+                # print(paste0('unaug h = ', h_unaug))
+            } # end for subi
+
+            h = max(hlist) # \hat{d}_{n,A_j}         
+
+        } # end if j > 1
+
+        # declare new discoveries based on critical value 
+        disc_id_new = setdiff(crossdat[tabs > h]$id, disc_id)             
+
+        # if no new discoveries, go to next k
+        if (length(disc_id_new) == 0) {
+            break
+        }        
+
+        # update discoveries
+        disc_id = c(disc_id, disc_id_new)
+
+        print(paste0("k = ", k, ", j = ", j, ", h = ", round(h, 2), ", num_disc = ", length(disc_id)))
+
+    } # end j loop
+
+    kstepMout = tibble(
+        h = h, 
+        num_disc = length(disc_id),
+        j_last = j
+    )
+
+    return(kstepMout)
+
+} # end run_kstepM
 
 # Create retdat: df of returns used to find good signals ===========================
 
@@ -279,81 +365,18 @@ tic = Sys.time()
 setorder(bootdat, booti, -tabs) # sort bootdat
 for (k in seq(1, kmax, by = 1)) {
 
-    # initialize k-StepM        
-    disc_id = c() # no discoveries yet    
+    # run k-stepM function
+    kstepMout = run_kstepM(k, opt$alpha, opt$subsetmax, opt$kstepM_itermax)
+    h = kstepMout$h
+    j = kstepMout$j_last
+    num_disc = kstepMout$num_disc    
 
-    # do k-stepM: repeatedly add more discoveries
-    for (j in 1:opt$kstepM_itermax) {        
-
-        # create test set bootstrap
-        testboot = bootdat[!id %in% disc_id]
-
-        if ((j == 1) | (k==1)) {
-            # RW2007 Alg 2.1 Step j = 1
-
-            # find critical value based on ids in test set
-            kmaxboot = testboot[ , .SD[k], by = booti] 
-            h = quantile(kmaxboot$tabs, 1 - opt$alpha)         
-            
-        } else {
-            # RW2007 Alg 2.1 Step j > 1
-
-            # check feasibility
-            num_subsets = choose(length(disc_id), k-1)
-            if (num_subsets > opt$subsetmax) {
-                print(paste0('num_subsets = ', num_subsets, ' > subsetmax = ', opt$subsetmax, ' going to next k'))
-                break
-            }        
-
-            # find new hurdle
-            disc_id_subsets = combn(disc_id, k-1)
-            hlist = numeric(num_subsets)*NA
-            for (subi in 1:num_subsets) {
-                # find hurdle from an augmented test set (\hat{c}_{n,K} for K = A_j \cup I)
-                # this loop is infuriating because it's slow and essentially every single subi
-                # produces the same hurdle (see below)
-                
-                disc_id_subset = disc_id_subsets[ , subi] # I
-                temp = testboot %>% rbind(bootdat[id %in% disc_id_subset]) # K = A_j \cup I
-                setorder(temp, booti, -tabs)
-                kmaxboot = temp[ , .SD[k], by = booti]
-
-                # find critical value based on ids in test set
-                hlist[subi] = quantile(kmaxboot$tabs, 1 - opt$alpha) # \hat{c}_{n,K}
-
-                print(paste0('subi = ', subi, ' h = ', round(hlist[subi], 2), ' of ', num_subsets))
-
-                # compare with unaugmented (almost always the same)
-                # kmaxboot_unaug = testboot[ , .SD[k], by = booti]
-                # h_unaug = quantile(kmaxboot_unaug$tabs, 1 - opt$alpha)
-                # print(paste0('unaug h = ', h_unaug))
-            } # end for subi
-
-            h = max(hlist) # \hat{d}_{n,A_j}         
-
-        } # end if j > 1
-
-        # declare new discoveries based on critical value 
-        disc_id_new = setdiff(crossdat[tabs > h]$id, disc_id)             
-
-        # if no new discoveries, go to next k
-        if (length(disc_id_new) == 0) {
-            break
-        }        
-
-        # update discoveries
-        disc_id = c(disc_id, disc_id_new)
-
-        print(paste0("k = ", k, ", j = ", j, ", h = ", round(h, 2), ", num_disc = ", length(disc_id)))
-
-    } # end j loop
-
-    stop_cond <- k / (length(disc_id) + 1) > opt$gamma
-    print(paste0("FDPhat = ", round(k / (length(disc_id) + 1), 3)))
+    stop_cond <- k / (num_disc + 1) > opt$gamma
+    print(paste0("FDPhat = ", round(k / (num_disc + 1), 3)))
     if (stop_cond) {
         print(paste0("Stopping at k = ", k))
-        print(paste0("gammahat = ", round(k / (length(disc_id) + 1), 2)))
-        print(paste0("Num discoveries: ", length(disc_id)))
+        print(paste0("gammahat = ", round(k / (num_disc + 1), 2)))
+        print(paste0("Num discoveries: ", num_disc))
         print(paste0("hurdle = ", round(h, 2)))
         print(paste0("j iter = ", j))
         print(paste0("j break condition: ", stop_cond))
@@ -376,7 +399,7 @@ RSW_result = tibble(
     gamma = opt$gamma,
     k_last = k,
     j_last = j,
-    num_disc = length(disc_id)
+    num_disc = num_disc
 )
 
 # create outpath if it doesn't exist
