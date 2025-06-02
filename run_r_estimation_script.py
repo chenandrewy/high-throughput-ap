@@ -21,8 +21,11 @@ path_output = path_root + '/../../Data/'
 
 r_script = path_r_script + 'estimate_EB_distr.r'
 # r_script = path_r_script + 'r_trial.r'
-rollsignal_name = 'OOS_signal_tstat_OosNyears1.csv.gzip'
-out_prefix = 'ChuksDebug_'
+# rollsignal_name = 'OOS_signal_tstat_OosNyears1.csv.gzip'
+rollsignal_name = 'selected_acc_signals.csv'
+
+# out_prefix = 'ChuksDebug'
+out_prefix = 'Chuks_SelAcc'
 
 
 #%%
